@@ -14122,3 +14122,458 @@ def test_ec2_egress_only_igw_not_found(ec2):
             EgressOnlyInternetGatewayId="eigw-nonexistent"
         )
     assert "NotFound" in exc.value.response["Error"]["Code"]
+
+
+# ─── CloudFormation ───────────────────────────────────────────────────
+
+def test_cfn_create_describe_delete_stack(cfn):
+    """Create a simple stack, describe it, then delete it."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Description": "Test stack",
+        "Resources": {
+            "MyBucket": {
+                "Type": "AWS::S3::Bucket",
+                "Properties": {"BucketName": "cfn-test-bucket-1"}
+            }
+        }
+    })
+    resp = cfn.create_stack(StackName="test-cfn-stack", TemplateBody=template)
+    assert "StackId" in resp
+    stack_id = resp["StackId"]
+    assert stack_id.startswith("arn:aws:cloudformation:")
+
+    # Describe
+    desc = cfn.describe_stacks(StackName="test-cfn-stack")
+    stacks = desc["Stacks"]
+    assert len(stacks) == 1
+    assert stacks[0]["StackName"] == "test-cfn-stack"
+    assert stacks[0]["StackStatus"] == "CREATE_COMPLETE"
+    assert stacks[0]["Description"] == "Test stack"
+
+    # Delete
+    cfn.delete_stack(StackName="test-cfn-stack")
+
+    # After delete, describe by name should fail
+    from botocore.exceptions import ClientError
+    with pytest.raises(ClientError) as exc:
+        cfn.describe_stacks(StackName="test-cfn-stack")
+    assert "does not exist" in str(exc.value)
+
+
+def test_cfn_list_stacks(cfn):
+    """Create two stacks and list them."""
+    for name in ("cfn-list-a", "cfn-list-b"):
+        cfn.create_stack(
+            StackName=name,
+            TemplateBody=json.dumps({
+                "AWSTemplateFormatVersion": "2010-09-09",
+                "Resources": {
+                    "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {}}
+                }
+            }),
+        )
+    resp = cfn.list_stacks(StackStatusFilter=["CREATE_COMPLETE"])
+    summaries = resp["StackSummaries"]
+    names = [s["StackName"] for s in summaries]
+    assert "cfn-list-a" in names
+    assert "cfn-list-b" in names
+
+
+def test_cfn_stack_with_parameters(cfn):
+    """Create a stack with parameters and verify outputs."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Parameters": {
+            "EnvName": {
+                "Type": "String",
+                "Default": "dev"
+            }
+        },
+        "Resources": {
+            "Queue": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {
+                    "QueueName": {"Fn::Sub": "cfn-${EnvName}-queue"}
+                }
+            }
+        },
+        "Outputs": {
+            "QueueName": {
+                "Value": {"Fn::Sub": "cfn-${EnvName}-queue"},
+                "Description": "The queue name"
+            }
+        }
+    })
+    resp = cfn.create_stack(
+        StackName="cfn-param-stack",
+        TemplateBody=template,
+        Parameters=[{"ParameterKey": "EnvName", "ParameterValue": "staging"}],
+    )
+    assert "StackId" in resp
+
+    desc = cfn.describe_stacks(StackName="cfn-param-stack")
+    stack = desc["Stacks"][0]
+    assert stack["StackStatus"] == "CREATE_COMPLETE"
+
+    # Check parameters were stored
+    param_keys = {p["ParameterKey"]: p["ParameterValue"] for p in stack.get("Parameters", [])}
+    assert param_keys.get("EnvName") == "staging"
+
+    # Check outputs
+    outputs = {o["OutputKey"]: o["OutputValue"] for o in stack.get("Outputs", [])}
+    assert outputs.get("QueueName") == "cfn-staging-queue"
+
+
+def test_cfn_get_template(cfn):
+    """GetTemplate returns the stored template."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {}}
+        }
+    })
+    cfn.create_stack(StackName="cfn-gettempl", TemplateBody=template)
+    resp = cfn.get_template(StackName="cfn-gettempl")
+    assert "TemplateBody" in resp
+    body = resp["TemplateBody"]
+    if isinstance(body, str):
+        body = json.loads(body)
+    assert "Resources" in body
+
+
+def test_cfn_validate_template(cfn):
+    """ValidateTemplate returns parameter info."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Description": "Validate me",
+        "Parameters": {
+            "Env": {"Type": "String", "Default": "prod", "Description": "Environment"}
+        },
+        "Resources": {
+            "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {}}
+        }
+    })
+    resp = cfn.validate_template(TemplateBody=template)
+    assert resp.get("Description") == "Validate me"
+    params = resp.get("Parameters", [])
+    assert len(params) >= 1
+    assert params[0]["ParameterKey"] == "Env"
+    assert params[0]["DefaultValue"] == "prod"
+
+
+def test_cfn_list_stack_resources(cfn):
+    """ListStackResources returns resources in a stack."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "TopicA": {"Type": "AWS::SNS::Topic", "Properties": {"TopicName": "cfn-res-topic-a"}},
+            "TopicB": {"Type": "AWS::SNS::Topic", "Properties": {"TopicName": "cfn-res-topic-b"}},
+        }
+    })
+    cfn.create_stack(StackName="cfn-resources-stack", TemplateBody=template)
+    resp = cfn.list_stack_resources(StackName="cfn-resources-stack")
+    summaries = resp["StackResourceSummaries"]
+    logical_ids = [r["LogicalResourceId"] for r in summaries]
+    assert "TopicA" in logical_ids
+    assert "TopicB" in logical_ids
+    for r in summaries:
+        assert r["ResourceStatus"] == "CREATE_COMPLETE"
+        assert r["ResourceType"] == "AWS::SNS::Topic"
+
+
+def test_cfn_describe_stack_events(cfn):
+    """DescribeStackEvents returns events for stack creation."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "cfn-events-bucket"}}
+        }
+    })
+    cfn.create_stack(StackName="cfn-events-stack", TemplateBody=template)
+    resp = cfn.describe_stack_events(StackName="cfn-events-stack")
+    events = resp["StackEvents"]
+    assert len(events) > 0
+    statuses = [e["ResourceStatus"] for e in events]
+    assert "CREATE_COMPLETE" in statuses
+
+
+def test_cfn_update_stack(cfn):
+    """UpdateStack updates a stack's template."""
+    template1 = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Description": "Version 1",
+        "Resources": {
+            "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {}}
+        }
+    })
+    cfn.create_stack(StackName="cfn-update-stack", TemplateBody=template1)
+
+    template2 = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Description": "Version 2",
+        "Resources": {
+            "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {}},
+            "Queue": {"Type": "AWS::SQS::Queue", "Properties": {}}
+        }
+    })
+    resp = cfn.update_stack(StackName="cfn-update-stack", TemplateBody=template2)
+    assert "StackId" in resp
+
+    desc = cfn.describe_stacks(StackName="cfn-update-stack")
+    stack = desc["Stacks"][0]
+    assert stack["StackStatus"] == "UPDATE_COMPLETE"
+    assert stack["Description"] == "Version 2"
+
+
+def test_cfn_change_set_create_describe_execute(cfn):
+    """Create and execute a change set."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "cfn-cs-bucket"}}
+        }
+    })
+    cfn.create_stack(StackName="cfn-cs-stack", TemplateBody=template)
+
+    new_template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "cfn-cs-bucket"}},
+            "Queue": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "cfn-cs-queue"}}
+        }
+    })
+    cs_resp = cfn.create_change_set(
+        StackName="cfn-cs-stack",
+        ChangeSetName="my-change-set",
+        TemplateBody=new_template,
+    )
+    assert "Id" in cs_resp
+    cs_id = cs_resp["Id"]
+
+    # Describe
+    desc = cfn.describe_change_set(ChangeSetName="my-change-set", StackName="cfn-cs-stack")
+    assert desc["ChangeSetName"] == "my-change-set"
+    assert desc["Status"] == "CREATE_COMPLETE"
+    assert desc["ExecutionStatus"] == "AVAILABLE"
+
+    # List
+    listed = cfn.list_change_sets(StackName="cfn-cs-stack")
+    assert len(listed["Summaries"]) >= 1
+    assert any(s["ChangeSetName"] == "my-change-set" for s in listed["Summaries"])
+
+    # Execute
+    cfn.execute_change_set(ChangeSetName="my-change-set", StackName="cfn-cs-stack")
+    desc2 = cfn.describe_stacks(StackName="cfn-cs-stack")
+    assert desc2["Stacks"][0]["StackStatus"] == "UPDATE_COMPLETE"
+
+
+def test_cfn_delete_change_set(cfn):
+    """Delete a change set."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {}}
+        }
+    })
+    cfn.create_stack(StackName="cfn-del-cs-stack", TemplateBody=template)
+    cfn.create_change_set(
+        StackName="cfn-del-cs-stack",
+        ChangeSetName="delete-me",
+        TemplateBody=template,
+    )
+    cfn.delete_change_set(ChangeSetName="delete-me", StackName="cfn-del-cs-stack")
+
+    from botocore.exceptions import ClientError
+    with pytest.raises(ClientError) as exc:
+        cfn.describe_change_set(ChangeSetName="delete-me", StackName="cfn-del-cs-stack")
+    assert "ChangeSetNotFound" in str(exc.value) or "does not exist" in str(exc.value)
+
+
+def test_cfn_describe_stack_resource(cfn):
+    """DescribeStackResource returns a single resource."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "MyBucket": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "cfn-single-res"}}
+        }
+    })
+    cfn.create_stack(StackName="cfn-single-res-stack", TemplateBody=template)
+    resp = cfn.describe_stack_resource(
+        StackName="cfn-single-res-stack",
+        LogicalResourceId="MyBucket",
+    )
+    detail = resp["StackResourceDetail"]
+    assert detail["LogicalResourceId"] == "MyBucket"
+    assert detail["ResourceType"] == "AWS::S3::Bucket"
+    assert detail["ResourceStatus"] == "CREATE_COMPLETE"
+
+
+def test_cfn_get_template_summary(cfn):
+    """GetTemplateSummary returns metadata about a template."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Description": "Summary test",
+        "Parameters": {
+            "Env": {"Type": "String", "Default": "dev"}
+        },
+        "Resources": {
+            "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {}}
+        }
+    })
+    resp = cfn.get_template_summary(TemplateBody=template)
+    assert resp.get("Description") == "Summary test"
+    assert len(resp.get("Parameters", [])) >= 1
+    resource_types = resp.get("ResourceTypes", [])
+    assert "AWS::S3::Bucket" in resource_types
+
+
+def test_cfn_stack_not_found(cfn):
+    """DescribeStacks on non-existent stack raises error."""
+    from botocore.exceptions import ClientError
+    with pytest.raises(ClientError) as exc:
+        cfn.describe_stacks(StackName="nonexistent-stack-xyz")
+    assert "does not exist" in str(exc.value)
+
+
+def test_cfn_list_exports_imports(cfn):
+    """Create stack with exports, then list exports."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "cfn-export-bucket"}}
+        },
+        "Outputs": {
+            "BucketOutput": {
+                "Value": "cfn-export-bucket",
+                "Export": {"Name": "cfn-exported-bucket-name"}
+            }
+        }
+    })
+    cfn.create_stack(StackName="cfn-exports-stack", TemplateBody=template)
+
+    exports = cfn.list_exports()
+    export_names = [e["Name"] for e in exports.get("Exports", [])]
+    assert "cfn-exported-bucket-name" in export_names
+
+
+def test_cfn_intrinsic_fn_join(cfn):
+    """Fn::Join resolves correctly in stack outputs."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {}}
+        },
+        "Outputs": {
+            "Joined": {
+                "Value": {"Fn::Join": ["-", ["hello", "world", "test"]]}
+            }
+        }
+    })
+    cfn.create_stack(StackName="cfn-join-stack", TemplateBody=template)
+    desc = cfn.describe_stacks(StackName="cfn-join-stack")
+    outputs = {o["OutputKey"]: o["OutputValue"] for o in desc["Stacks"][0].get("Outputs", [])}
+    assert outputs.get("Joined") == "hello-world-test"
+
+
+def test_cfn_intrinsic_fn_select(cfn):
+    """Fn::Select resolves correctly in stack outputs."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {}}
+        },
+        "Outputs": {
+            "Selected": {
+                "Value": {"Fn::Select": [1, ["a", "b", "c"]]}
+            }
+        }
+    })
+    cfn.create_stack(StackName="cfn-select-stack", TemplateBody=template)
+    desc = cfn.describe_stacks(StackName="cfn-select-stack")
+    outputs = {o["OutputKey"]: o["OutputValue"] for o in desc["Stacks"][0].get("Outputs", [])}
+    assert outputs.get("Selected") == "b"
+
+
+def test_cfn_pseudo_parameters(cfn):
+    """Pseudo parameters like AWS::StackName resolve in outputs."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {}}
+        },
+        "Outputs": {
+            "StackName": {"Value": {"Ref": "AWS::StackName"}},
+            "Region": {"Value": {"Ref": "AWS::Region"}},
+            "AccountId": {"Value": {"Ref": "AWS::AccountId"}},
+        }
+    })
+    cfn.create_stack(StackName="cfn-pseudo-stack", TemplateBody=template)
+    desc = cfn.describe_stacks(StackName="cfn-pseudo-stack")
+    outputs = {o["OutputKey"]: o["OutputValue"] for o in desc["Stacks"][0].get("Outputs", [])}
+    assert outputs.get("StackName") == "cfn-pseudo-stack"
+    assert outputs.get("Region") == "us-east-1"
+    assert outputs.get("AccountId") == "000000000000"
+
+
+def test_cfn_describe_stack_resources(cfn):
+    """DescribeStackResources returns all resources in a stack."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "BucketA": {"Type": "AWS::S3::Bucket", "Properties": {}},
+            "BucketB": {"Type": "AWS::S3::Bucket", "Properties": {}},
+        }
+    })
+    cfn.create_stack(StackName="cfn-desc-res-stack", TemplateBody=template)
+    resp = cfn.describe_stack_resources(StackName="cfn-desc-res-stack")
+    resources = resp["StackResources"]
+    logical_ids = [r["LogicalResourceId"] for r in resources]
+    assert "BucketA" in logical_ids
+    assert "BucketB" in logical_ids
+
+
+def test_cfn_tags(cfn):
+    """CreateStack with tags and verify them in DescribeStacks."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {}}
+        }
+    })
+    cfn.create_stack(
+        StackName="cfn-tags-stack",
+        TemplateBody=template,
+        Tags=[{"Key": "Env", "Value": "test"}, {"Key": "App", "Value": "ministack"}],
+    )
+    desc = cfn.describe_stacks(StackName="cfn-tags-stack")
+    tags = {t["Key"]: t["Value"] for t in desc["Stacks"][0].get("Tags", [])}
+    assert tags.get("Env") == "test"
+    assert tags.get("App") == "ministack"
+
+
+def test_cfn_change_set_for_new_stack(cfn):
+    """Create a change set for a new stack (ChangeSetType=CREATE)."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "cfn-cs-new-bucket"}}
+        }
+    })
+    resp = cfn.create_change_set(
+        StackName="cfn-cs-new-stack",
+        ChangeSetName="initial-cs",
+        TemplateBody=template,
+        ChangeSetType="CREATE",
+    )
+    assert "Id" in resp
+
+    desc = cfn.describe_change_set(ChangeSetName="initial-cs", StackName="cfn-cs-new-stack")
+    assert desc["Status"] == "CREATE_COMPLETE"
+    assert desc["ExecutionStatus"] == "AVAILABLE"
+    assert len(desc.get("Changes", [])) > 0
+
+    # Execute to create the stack
+    cfn.execute_change_set(ChangeSetName="initial-cs", StackName="cfn-cs-new-stack")
+    stack = cfn.describe_stacks(StackName="cfn-cs-new-stack")["Stacks"][0]
+    assert stack["StackStatus"] in ("CREATE_COMPLETE", "UPDATE_COMPLETE")
