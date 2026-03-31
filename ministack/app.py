@@ -38,6 +38,7 @@ from ministack.services import cognito
 from ministack.services import emr
 from ministack.services import efs
 from ministack.services import cloudformation
+from ministack.services import cloudtrail
 from ministack.services.iam_sts import handle_iam_request, handle_sts_request
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -79,6 +80,7 @@ SERVICE_HANDLERS = {
     "elasticloadbalancing": alb.handle_request,
     "elasticfilesystem": efs.handle_request,
     "cloudformation": cloudformation.handle_request,
+    "cloudtrail": cloudtrail.handle_request,
 }
 
 SERVICE_NAME_ALIASES = {
@@ -447,6 +449,7 @@ def _reset_all_state():
         (alb, alb.reset),
         (efs, efs.reset),
         (cloudformation, cloudformation.reset),
+        (cloudtrail, cloudtrail.reset),
     ]:
         try:
             fn()

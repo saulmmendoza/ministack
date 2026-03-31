@@ -138,6 +138,10 @@ SERVICE_PATTERNS = {
     "cloudformation": {
         "host_patterns": [r"cloudformation\."],
     },
+    "cloudtrail": {
+        "target_prefixes": ["CloudTrail_20131101"],
+        "host_patterns": [r"cloudtrail\."],
+    },
 }
 
 
@@ -184,6 +188,7 @@ def detect_service(method: str, path: str, headers: dict, query_params: dict) ->
                 "elasticloadbalancing": "elasticloadbalancing",
                 "elasticfilesystem": "elasticfilesystem",
                 "cloudformation": "cloudformation",
+                "cloudtrail": "cloudtrail",
             }
             if svc_name in scope_map:
                 return scope_map[svc_name]
