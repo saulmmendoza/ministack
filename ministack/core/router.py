@@ -135,6 +135,9 @@ SERVICE_PATTERNS = {
     "elasticloadbalancing": {
         "host_patterns": [r"elasticloadbalancing\."],
     },
+    "cloudformation": {
+        "host_patterns": [r"cloudformation\."],
+    },
 }
 
 
@@ -180,6 +183,7 @@ def detect_service(method: str, path: str, headers: dict, query_params: dict) ->
                 "elasticmapreduce": "elasticmapreduce",
                 "elasticloadbalancing": "elasticloadbalancing",
                 "elasticfilesystem": "elasticfilesystem",
+                "cloudformation": "cloudformation",
             }
             if svc_name in scope_map:
                 return scope_map[svc_name]
@@ -352,6 +356,25 @@ def detect_service(method: str, path: str, headers: dict, query_params: dict) ->
             "CreateSnapshot": "ec2", "DeleteSnapshot": "ec2", "DescribeSnapshots": "ec2",
             "CopySnapshot": "ec2", "ModifySnapshotAttribute": "ec2",
             "DescribeSnapshotAttribute": "ec2",
+            # CloudFormation actions
+            "CreateStack": "cloudformation", "UpdateStack": "cloudformation",
+            "DeleteStack": "cloudformation", "DescribeStacks": "cloudformation",
+            "ListStacks": "cloudformation", "GetTemplate": "cloudformation",
+            "ValidateTemplate": "cloudformation", "GetTemplateSummary": "cloudformation",
+            "ListStackResources": "cloudformation",
+            "DescribeStackResources": "cloudformation",
+            "DescribeStackResource": "cloudformation",
+            "DescribeStackEvents": "cloudformation",
+            "CreateChangeSet": "cloudformation", "DescribeChangeSet": "cloudformation",
+            "ExecuteChangeSet": "cloudformation", "DeleteChangeSet": "cloudformation",
+            "ListChangeSets": "cloudformation",
+            "ListExports": "cloudformation", "ListImports": "cloudformation",
+            "CreateStackSet": "cloudformation", "DescribeStackSet": "cloudformation",
+            "UpdateStackSet": "cloudformation", "DeleteStackSet": "cloudformation",
+            "ListStackSets": "cloudformation",
+            "CreateStackInstances": "cloudformation",
+            "ListStackInstances": "cloudformation",
+            "DeleteStackInstances": "cloudformation",
         }
         if action in action_service_map:
             return action_service_map[action]
