@@ -14866,3 +14866,405 @@ def test_cfn_provision_stepfunctions_statemachine(cfn):
     summaries = res["StackResourceSummaries"]
     assert any(r["ResourceType"] == "AWS::StepFunctions::StateMachine" for r in summaries)
     assert all(r["ResourceStatus"] == "CREATE_COMPLETE" for r in summaries)
+
+
+# ========== CodeBuild ==========
+
+
+def test_codebuild_create_and_get_project(codebuild):
+    codebuild.create_project(
+        name="cb-test-project",
+        source={"type": "NO_SOURCE"},
+        artifacts={"type": "NO_ARTIFACTS"},
+        environment={
+            "type": "LINUX_CONTAINER",
+            "image": "aws/codebuild/standard:7.0",
+            "computeType": "BUILD_GENERAL1_SMALL",
+        },
+        serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+    )
+    resp = codebuild.batch_get_projects(names=["cb-test-project"])
+    assert len(resp["projects"]) == 1
+    assert resp["projects"][0]["name"] == "cb-test-project"
+
+
+def test_codebuild_list_projects(codebuild):
+    codebuild.create_project(
+        name="cb-list-project",
+        source={"type": "NO_SOURCE"},
+        artifacts={"type": "NO_ARTIFACTS"},
+        environment={
+            "type": "LINUX_CONTAINER",
+            "image": "aws/codebuild/standard:7.0",
+            "computeType": "BUILD_GENERAL1_SMALL",
+        },
+        serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+    )
+    resp = codebuild.list_projects()
+    assert "cb-list-project" in resp["projects"]
+
+
+def test_codebuild_duplicate_project(codebuild):
+    codebuild.create_project(
+        name="cb-dup-project",
+        source={"type": "NO_SOURCE"},
+        artifacts={"type": "NO_ARTIFACTS"},
+        environment={
+            "type": "LINUX_CONTAINER",
+            "image": "aws/codebuild/standard:7.0",
+            "computeType": "BUILD_GENERAL1_SMALL",
+        },
+        serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+    )
+    with pytest.raises(ClientError) as exc:
+        codebuild.create_project(
+            name="cb-dup-project",
+            source={"type": "NO_SOURCE"},
+            artifacts={"type": "NO_ARTIFACTS"},
+            environment={
+                "type": "LINUX_CONTAINER",
+                "image": "aws/codebuild/standard:7.0",
+                "computeType": "BUILD_GENERAL1_SMALL",
+            },
+            serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+        )
+    assert "already exists" in str(exc.value).lower() or "ResourceAlreadyExistsException" in str(exc.value)
+
+
+def test_codebuild_update_project(codebuild):
+    codebuild.create_project(
+        name="cb-update-project",
+        source={"type": "NO_SOURCE"},
+        artifacts={"type": "NO_ARTIFACTS"},
+        environment={
+            "type": "LINUX_CONTAINER",
+            "image": "aws/codebuild/standard:7.0",
+            "computeType": "BUILD_GENERAL1_SMALL",
+        },
+        serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+    )
+    resp = codebuild.update_project(name="cb-update-project", description="updated description")
+    assert resp["project"]["description"] == "updated description"
+
+
+def test_codebuild_delete_project(codebuild):
+    codebuild.create_project(
+        name="cb-delete-project",
+        source={"type": "NO_SOURCE"},
+        artifacts={"type": "NO_ARTIFACTS"},
+        environment={
+            "type": "LINUX_CONTAINER",
+            "image": "aws/codebuild/standard:7.0",
+            "computeType": "BUILD_GENERAL1_SMALL",
+        },
+        serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+    )
+    codebuild.delete_project(name="cb-delete-project")
+    resp = codebuild.batch_get_projects(names=["cb-delete-project"])
+    assert len(resp["projects"]) == 0
+    assert "cb-delete-project" in resp["projectsNotFound"]
+
+
+def test_codebuild_start_and_get_build(codebuild):
+    codebuild.create_project(
+        name="cb-build-project",
+        source={"type": "NO_SOURCE"},
+        artifacts={"type": "NO_ARTIFACTS"},
+        environment={
+            "type": "LINUX_CONTAINER",
+            "image": "aws/codebuild/standard:7.0",
+            "computeType": "BUILD_GENERAL1_SMALL",
+        },
+        serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+    )
+    start_resp = codebuild.start_build(projectName="cb-build-project")
+    build_id = start_resp["build"]["id"]
+    assert build_id.startswith("cb-build-project:")
+    assert start_resp["build"]["buildStatus"] == "IN_PROGRESS"
+
+    get_resp = codebuild.batch_get_builds(ids=[build_id])
+    assert len(get_resp["builds"]) == 1
+    assert get_resp["builds"][0]["id"] == build_id
+
+
+def test_codebuild_list_builds(codebuild):
+    codebuild.create_project(
+        name="cb-listbuilds-project",
+        source={"type": "NO_SOURCE"},
+        artifacts={"type": "NO_ARTIFACTS"},
+        environment={
+            "type": "LINUX_CONTAINER",
+            "image": "aws/codebuild/standard:7.0",
+            "computeType": "BUILD_GENERAL1_SMALL",
+        },
+        serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+    )
+    resp = codebuild.start_build(projectName="cb-listbuilds-project")
+    build_id = resp["build"]["id"]
+
+    list_resp = codebuild.list_builds()
+    assert build_id in list_resp["ids"]
+
+    list_for_resp = codebuild.list_builds_for_project(projectName="cb-listbuilds-project")
+    assert build_id in list_for_resp["ids"]
+
+
+def test_codebuild_stop_build(codebuild):
+    codebuild.create_project(
+        name="cb-stop-project",
+        source={"type": "NO_SOURCE"},
+        artifacts={"type": "NO_ARTIFACTS"},
+        environment={
+            "type": "LINUX_CONTAINER",
+            "image": "aws/codebuild/standard:7.0",
+            "computeType": "BUILD_GENERAL1_SMALL",
+        },
+        serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+    )
+    start_resp = codebuild.start_build(projectName="cb-stop-project")
+    build_id = start_resp["build"]["id"]
+    stop_resp = codebuild.stop_build(id=build_id)
+    assert stop_resp["build"]["buildStatus"] in ("STOPPED", "IN_PROGRESS", "SUCCEEDED")
+
+
+def test_codebuild_batch_delete_builds(codebuild):
+    codebuild.create_project(
+        name="cb-batchdel-project",
+        source={"type": "NO_SOURCE"},
+        artifacts={"type": "NO_ARTIFACTS"},
+        environment={
+            "type": "LINUX_CONTAINER",
+            "image": "aws/codebuild/standard:7.0",
+            "computeType": "BUILD_GENERAL1_SMALL",
+        },
+        serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+    )
+    start_resp = codebuild.start_build(projectName="cb-batchdel-project")
+    build_id = start_resp["build"]["id"]
+    del_resp = codebuild.batch_delete_builds(ids=[build_id])
+    assert any(b["id"] == build_id for b in del_resp.get("buildsDeleted", []))
+
+
+def test_codebuild_webhook_crud(codebuild):
+    codebuild.create_project(
+        name="cb-webhook-project",
+        source={"type": "GITHUB", "location": "https://github.com/example/repo"},
+        artifacts={"type": "NO_ARTIFACTS"},
+        environment={
+            "type": "LINUX_CONTAINER",
+            "image": "aws/codebuild/standard:7.0",
+            "computeType": "BUILD_GENERAL1_SMALL",
+        },
+        serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+    )
+    wh_resp = codebuild.create_webhook(projectName="cb-webhook-project", branchFilter="main")
+    assert "webhook" in wh_resp
+
+    upd_resp = codebuild.update_webhook(projectName="cb-webhook-project", branchFilter="develop")
+    assert "webhook" in upd_resp
+
+    codebuild.delete_webhook(projectName="cb-webhook-project")
+    proj_resp = codebuild.batch_get_projects(names=["cb-webhook-project"])
+    assert proj_resp["projects"][0].get("webhook") is None
+
+
+def test_codebuild_tags(codebuild):
+    codebuild.create_project(
+        name="cb-tags-project",
+        source={"type": "NO_SOURCE"},
+        artifacts={"type": "NO_ARTIFACTS"},
+        environment={
+            "type": "LINUX_CONTAINER",
+            "image": "aws/codebuild/standard:7.0",
+            "computeType": "BUILD_GENERAL1_SMALL",
+        },
+        serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+        tags=[{"key": "env", "value": "test"}],
+    )
+    # Verify tags stored on the project resource
+    resp = codebuild.batch_get_projects(names=["cb-tags-project"])
+    proj_tags = resp["projects"][0].get("tags", [])
+    assert any(t["key"] == "env" for t in proj_tags)
+
+    # Update project with additional tags via update_project
+    codebuild.update_project(
+        name="cb-tags-project",
+        tags=[{"key": "env", "value": "test"}, {"key": "team", "value": "ci"}],
+    )
+    resp2 = codebuild.batch_get_projects(names=["cb-tags-project"])
+    proj_tags2 = resp2["projects"][0].get("tags", [])
+    assert any(t["key"] == "team" for t in proj_tags2)
+
+    # Remove the env tag by updating tags list
+    codebuild.update_project(
+        name="cb-tags-project",
+        tags=[{"key": "team", "value": "ci"}],
+    )
+    resp3 = codebuild.batch_get_projects(names=["cb-tags-project"])
+    proj_tags3 = resp3["projects"][0].get("tags", [])
+    assert not any(t["key"] == "env" for t in proj_tags3)
+
+
+def test_codebuild_list_curated_environment_images(codebuild):
+    resp = codebuild.list_curated_environment_images()
+    assert "platforms" in resp
+    assert len(resp["platforms"]) > 0
+
+
+# ========== CodePipeline ==========
+
+
+def _pipeline_def(name, stage_name="Source"):
+    return {
+        "name": name,
+        "roleArn": "arn:aws:iam::000000000000:role/codepipeline-role",
+        "artifactStore": {"type": "S3", "location": "my-pipeline-bucket"},
+        "stages": [
+            {
+                "name": stage_name,
+                "actions": [
+                    {
+                        "name": "SourceAction",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "S3",
+                            "version": "1",
+                        },
+                        "outputArtifacts": [{"name": "SourceOutput"}],
+                        "configuration": {
+                            "S3Bucket": "my-source-bucket",
+                            "S3ObjectKey": "source.zip",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def test_codepipeline_create_and_get(codepipeline):
+    codepipeline.create_pipeline(pipeline=_pipeline_def("cp-test-pipeline"))
+    resp = codepipeline.get_pipeline(name="cp-test-pipeline")
+    assert resp["pipeline"]["name"] == "cp-test-pipeline"
+
+
+def test_codepipeline_list_pipelines(codepipeline):
+    codepipeline.create_pipeline(pipeline=_pipeline_def("cp-list-pipeline"))
+    resp = codepipeline.list_pipelines()
+    names = [p["name"] for p in resp["pipelines"]]
+    assert "cp-list-pipeline" in names
+
+
+def test_codepipeline_duplicate_pipeline(codepipeline):
+    codepipeline.create_pipeline(pipeline=_pipeline_def("cp-dup-pipeline"))
+    with pytest.raises(ClientError) as exc:
+        codepipeline.create_pipeline(pipeline=_pipeline_def("cp-dup-pipeline"))
+    assert "already exists" in str(exc.value).lower() or "PipelineNameInUse" in str(exc.value)
+
+
+def test_codepipeline_update_pipeline(codepipeline):
+    codepipeline.create_pipeline(pipeline=_pipeline_def("cp-update-pipeline"))
+    updated = _pipeline_def("cp-update-pipeline", stage_name="UpdatedSource")
+    resp = codepipeline.update_pipeline(pipeline=updated)
+    assert resp["pipeline"]["name"] == "cp-update-pipeline"
+    assert resp["pipeline"]["version"] == 2
+
+
+def test_codepipeline_delete_pipeline(codepipeline):
+    codepipeline.create_pipeline(pipeline=_pipeline_def("cp-delete-pipeline"))
+    codepipeline.delete_pipeline(name="cp-delete-pipeline")
+    with pytest.raises(ClientError) as exc:
+        codepipeline.get_pipeline(name="cp-delete-pipeline")
+    assert "not found" in str(exc.value).lower() or "PipelineNotFoundException" in str(exc.value)
+
+
+def test_codepipeline_start_execution(codepipeline):
+    codepipeline.create_pipeline(pipeline=_pipeline_def("cp-exec-pipeline"))
+    resp = codepipeline.start_pipeline_execution(name="cp-exec-pipeline")
+    assert "pipelineExecutionId" in resp
+
+
+def test_codepipeline_get_execution(codepipeline):
+    codepipeline.create_pipeline(pipeline=_pipeline_def("cp-getexec-pipeline"))
+    start_resp = codepipeline.start_pipeline_execution(name="cp-getexec-pipeline")
+    exec_id = start_resp["pipelineExecutionId"]
+    get_resp = codepipeline.get_pipeline_execution(
+        pipelineName="cp-getexec-pipeline",
+        pipelineExecutionId=exec_id,
+    )
+    assert get_resp["pipelineExecution"]["pipelineExecutionId"] == exec_id
+
+
+def test_codepipeline_list_executions(codepipeline):
+    codepipeline.create_pipeline(pipeline=_pipeline_def("cp-listexec-pipeline"))
+    codepipeline.start_pipeline_execution(name="cp-listexec-pipeline")
+    resp = codepipeline.list_pipeline_executions(pipelineName="cp-listexec-pipeline")
+    assert len(resp["pipelineExecutionSummaries"]) >= 1
+
+
+def test_codepipeline_get_pipeline_state(codepipeline):
+    codepipeline.create_pipeline(pipeline=_pipeline_def("cp-state-pipeline"))
+    resp = codepipeline.get_pipeline_state(name="cp-state-pipeline")
+    assert resp["pipelineName"] == "cp-state-pipeline"
+    assert len(resp["stageStates"]) == 1
+    assert resp["stageStates"][0]["stageName"] == "Source"
+
+
+def test_codepipeline_stage_transitions(codepipeline):
+    codepipeline.create_pipeline(pipeline=_pipeline_def("cp-trans-pipeline"))
+    codepipeline.disable_stage_transition(
+        pipelineName="cp-trans-pipeline",
+        stageName="Source",
+        transitionType="Inbound",
+        reason="Testing disable",
+    )
+    state = codepipeline.get_pipeline_state(name="cp-trans-pipeline")
+    assert state["stageStates"][0]["inboundTransitionState"]["enabled"] is False
+
+    codepipeline.enable_stage_transition(
+        pipelineName="cp-trans-pipeline",
+        stageName="Source",
+        transitionType="Inbound",
+    )
+    state2 = codepipeline.get_pipeline_state(name="cp-trans-pipeline")
+    assert state2["stageStates"][0]["inboundTransitionState"]["enabled"] is True
+
+
+def test_codepipeline_list_action_types(codepipeline):
+    resp = codepipeline.list_action_types()
+    assert len(resp["actionTypes"]) > 0
+    categories = {at["id"]["category"] for at in resp["actionTypes"]}
+    assert "Source" in categories
+    assert "Build" in categories
+
+
+def test_codepipeline_tags(codepipeline):
+    codepipeline.create_pipeline(
+        pipeline=_pipeline_def("cp-tags-pipeline"),
+        tags=[{"key": "env", "value": "test"}],
+    )
+    arn = f"arn:aws:codepipeline:us-east-1:000000000000:cp-tags-pipeline"
+    resp = codepipeline.list_tags_for_resource(resourceArn=arn)
+    assert any(t["key"] == "env" for t in resp["tags"])
+
+    codepipeline.tag_resource(resourceArn=arn, tags=[{"key": "team", "value": "ci"}])
+    resp2 = codepipeline.list_tags_for_resource(resourceArn=arn)
+    assert any(t["key"] == "team" for t in resp2["tags"])
+
+    codepipeline.untag_resource(resourceArn=arn, tagKeys=["env"])
+    resp3 = codepipeline.list_tags_for_resource(resourceArn=arn)
+    assert not any(t["key"] == "env" for t in resp3["tags"])
+
+
+def test_codepipeline_stop_execution(codepipeline):
+    codepipeline.create_pipeline(pipeline=_pipeline_def("cp-stop-pipeline"))
+    start_resp = codepipeline.start_pipeline_execution(name="cp-stop-pipeline")
+    exec_id = start_resp["pipelineExecutionId"]
+    stop_resp = codepipeline.stop_pipeline_execution(
+        pipelineName="cp-stop-pipeline",
+        pipelineExecutionId=exec_id,
+        abandon=True,
+        reason="Testing stop",
+    )
+    assert stop_resp["pipelineExecutionId"] == exec_id

@@ -138,6 +138,14 @@ SERVICE_PATTERNS = {
     "cloudformation": {
         "host_patterns": [r"cloudformation\."],
     },
+    "codebuild": {
+        "target_prefixes": ["CodeBuild_20161006"],
+        "host_patterns": [r"codebuild\."],
+    },
+    "codepipeline": {
+        "target_prefixes": ["CodePipeline_20150709"],
+        "host_patterns": [r"codepipeline\."],
+    },
 }
 
 
@@ -184,6 +192,8 @@ def detect_service(method: str, path: str, headers: dict, query_params: dict) ->
                 "elasticloadbalancing": "elasticloadbalancing",
                 "elasticfilesystem": "elasticfilesystem",
                 "cloudformation": "cloudformation",
+                "codebuild": "codebuild",
+                "codepipeline": "codepipeline",
             }
             if svc_name in scope_map:
                 return scope_map[svc_name]

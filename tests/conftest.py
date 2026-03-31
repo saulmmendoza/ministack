@@ -179,6 +179,14 @@ def cfn():
     return make_client("cloudformation")
 
 @pytest.fixture(scope="session")
+def codebuild():
+    return make_client("codebuild")
+
+@pytest.fixture(scope="session")
+def codepipeline():
+    return make_client("codepipeline")
+
+@pytest.fixture(scope="session")
 def sfn_sync():
     """SFN client for StartSyncExecution — forces same endpoint (boto3 normally prefixes sync-)."""
     from botocore.config import Config as BotoConfig
