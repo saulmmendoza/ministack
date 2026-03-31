@@ -14577,3 +14577,292 @@ def test_cfn_change_set_for_new_stack(cfn):
     cfn.execute_change_set(ChangeSetName="initial-cs", StackName="cfn-cs-new-stack")
     stack = cfn.describe_stacks(StackName="cfn-cs-new-stack")["Stacks"][0]
     assert stack["StackStatus"] in ("CREATE_COMPLETE", "UPDATE_COMPLETE")
+
+
+# ─── CloudFormation StackSets ─────────────────────────────────────────
+
+def test_cfn_stackset_create_describe_delete(cfn):
+    """Create, describe, and delete a stack set."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Description": "StackSet template",
+        "Resources": {
+            "Bucket": {"Type": "AWS::S3::Bucket", "Properties": {}}
+        }
+    })
+    resp = cfn.create_stack_set(StackSetName="test-ss-1", TemplateBody=template)
+    assert "StackSetId" in resp
+
+    desc = cfn.describe_stack_set(StackSetName="test-ss-1")
+    ss = desc["StackSet"]
+    assert ss["StackSetName"] == "test-ss-1"
+    assert ss["Status"] == "ACTIVE"
+    assert ss["Description"] == "StackSet template"
+
+    cfn.delete_stack_set(StackSetName="test-ss-1")
+    from botocore.exceptions import ClientError
+    with pytest.raises(ClientError) as exc:
+        cfn.describe_stack_set(StackSetName="test-ss-1")
+    assert "StackSetNotFound" in str(exc.value) or "does not exist" in str(exc.value)
+
+
+def test_cfn_stackset_list(cfn):
+    """Create stack sets and list them."""
+    for name in ("ss-list-a", "ss-list-b"):
+        cfn.create_stack_set(
+            StackSetName=name,
+            TemplateBody=json.dumps({
+                "AWSTemplateFormatVersion": "2010-09-09",
+                "Resources": {"B": {"Type": "AWS::S3::Bucket", "Properties": {}}}
+            }),
+        )
+    resp = cfn.list_stack_sets(Status="ACTIVE")
+    names = [s["StackSetName"] for s in resp.get("Summaries", [])]
+    assert "ss-list-a" in names
+    assert "ss-list-b" in names
+
+
+def test_cfn_stackset_update(cfn):
+    """Update a stack set and verify description changes."""
+    cfn.create_stack_set(
+        StackSetName="ss-update",
+        TemplateBody=json.dumps({
+            "AWSTemplateFormatVersion": "2010-09-09",
+            "Description": "v1",
+            "Resources": {"B": {"Type": "AWS::S3::Bucket", "Properties": {}}}
+        }),
+    )
+    resp = cfn.update_stack_set(
+        StackSetName="ss-update",
+        TemplateBody=json.dumps({
+            "AWSTemplateFormatVersion": "2010-09-09",
+            "Description": "v2",
+            "Resources": {"B": {"Type": "AWS::S3::Bucket", "Properties": {}}}
+        }),
+    )
+    assert "OperationId" in resp
+
+
+def test_cfn_stackset_instances(cfn):
+    """Create instances, list them, and delete them."""
+    cfn.create_stack_set(
+        StackSetName="ss-instances",
+        TemplateBody=json.dumps({
+            "AWSTemplateFormatVersion": "2010-09-09",
+            "Resources": {"B": {"Type": "AWS::S3::Bucket", "Properties": {}}}
+        }),
+    )
+    resp = cfn.create_stack_instances(
+        StackSetName="ss-instances",
+        Accounts=["000000000000"],
+        Regions=["us-east-1", "us-west-2"],
+    )
+    assert "OperationId" in resp
+
+    listed = cfn.list_stack_instances(StackSetName="ss-instances")
+    summaries = listed.get("Summaries", [])
+    regions = [s["Region"] for s in summaries]
+    assert "us-east-1" in regions
+    assert "us-west-2" in regions
+    assert all(s["Status"] == "CURRENT" for s in summaries)
+
+    cfn.delete_stack_instances(
+        StackSetName="ss-instances",
+        Accounts=["000000000000"],
+        Regions=["us-east-1"],
+        RetainStacks=False,
+    )
+    listed2 = cfn.list_stack_instances(StackSetName="ss-instances")
+    regions2 = [s["Region"] for s in listed2.get("Summaries", [])]
+    assert "us-east-1" not in regions2
+    assert "us-west-2" in regions2
+
+
+def test_cfn_stackset_not_found(cfn):
+    """Operations on non-existent stack set raise errors."""
+    from botocore.exceptions import ClientError
+    with pytest.raises(ClientError) as exc:
+        cfn.describe_stack_set(StackSetName="nonexistent-ss")
+    assert "does not exist" in str(exc.value) or "StackSetNotFound" in str(exc.value)
+
+
+def test_cfn_stackset_delete_nonempty(cfn):
+    """Cannot delete a stack set that has instances."""
+    cfn.create_stack_set(
+        StackSetName="ss-nonempty",
+        TemplateBody=json.dumps({
+            "AWSTemplateFormatVersion": "2010-09-09",
+            "Resources": {"B": {"Type": "AWS::S3::Bucket", "Properties": {}}}
+        }),
+    )
+    cfn.create_stack_instances(
+        StackSetName="ss-nonempty",
+        Accounts=["000000000000"],
+        Regions=["us-east-1"],
+    )
+    from botocore.exceptions import ClientError
+    with pytest.raises(ClientError) as exc:
+        cfn.delete_stack_set(StackSetName="ss-nonempty")
+    assert "NotEmpty" in str(exc.value) or "stack instances" in str(exc.value).lower()
+
+
+# ─── CloudFormation Resource Orchestration (new types) ────────────────
+
+def test_cfn_provision_lambda_function(cfn):
+    """Stack with AWS::Lambda::Function provisions via Lambda handler."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "MyFunc": {
+                "Type": "AWS::Lambda::Function",
+                "Properties": {
+                    "FunctionName": "cfn-test-lambda",
+                    "Runtime": "python3.12",
+                    "Handler": "index.handler",
+                    "Code": {"ZipFile": "def handler(event, context): return 'ok'"},
+                }
+            }
+        }
+    })
+    cfn.create_stack(StackName="cfn-lambda-stack", TemplateBody=template)
+    res = cfn.list_stack_resources(StackName="cfn-lambda-stack")
+    summaries = res["StackResourceSummaries"]
+    assert any(r["ResourceType"] == "AWS::Lambda::Function" for r in summaries)
+    assert all(r["ResourceStatus"] == "CREATE_COMPLETE" for r in summaries)
+
+
+def test_cfn_provision_iam_role(cfn):
+    """Stack with AWS::IAM::Role provisions via IAM handler."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "MyRole": {
+                "Type": "AWS::IAM::Role",
+                "Properties": {
+                    "RoleName": "cfn-test-role",
+                    "AssumeRolePolicyDocument": {
+                        "Version": "2012-10-17",
+                        "Statement": [{"Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"}, "Action": "sts:AssumeRole"}]
+                    }
+                }
+            }
+        }
+    })
+    cfn.create_stack(StackName="cfn-iam-stack", TemplateBody=template)
+    res = cfn.list_stack_resources(StackName="cfn-iam-stack")
+    summaries = res["StackResourceSummaries"]
+    assert any(r["ResourceType"] == "AWS::IAM::Role" for r in summaries)
+    assert all(r["ResourceStatus"] == "CREATE_COMPLETE" for r in summaries)
+
+
+def test_cfn_provision_kinesis_stream(cfn):
+    """Stack with AWS::Kinesis::Stream provisions via Kinesis handler."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "MyStream": {
+                "Type": "AWS::Kinesis::Stream",
+                "Properties": {"Name": "cfn-test-stream", "ShardCount": 1}
+            }
+        }
+    })
+    cfn.create_stack(StackName="cfn-kinesis-stack", TemplateBody=template)
+    res = cfn.list_stack_resources(StackName="cfn-kinesis-stack")
+    summaries = res["StackResourceSummaries"]
+    assert any(r["ResourceType"] == "AWS::Kinesis::Stream" for r in summaries)
+    assert all(r["ResourceStatus"] == "CREATE_COMPLETE" for r in summaries)
+
+
+def test_cfn_provision_ec2_vpc_subnet_sg(cfn):
+    """Stack with EC2 VPC, Subnet, and SecurityGroup provisions correctly."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "MyVPC": {
+                "Type": "AWS::EC2::VPC",
+                "Properties": {"CidrBlock": "10.200.0.0/16"}
+            },
+            "MySG": {
+                "Type": "AWS::EC2::SecurityGroup",
+                "Properties": {
+                    "GroupDescription": "CFN test SG",
+                    "GroupName": "cfn-test-sg"
+                }
+            }
+        }
+    })
+    cfn.create_stack(StackName="cfn-ec2-stack", TemplateBody=template)
+    res = cfn.list_stack_resources(StackName="cfn-ec2-stack")
+    types = [r["ResourceType"] for r in res["StackResourceSummaries"]]
+    assert "AWS::EC2::VPC" in types
+    assert "AWS::EC2::SecurityGroup" in types
+
+
+def test_cfn_provision_ecs_cluster(cfn):
+    """Stack with AWS::ECS::Cluster provisions via ECS handler."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "MyCluster": {
+                "Type": "AWS::ECS::Cluster",
+                "Properties": {"ClusterName": "cfn-test-cluster"}
+            }
+        }
+    })
+    cfn.create_stack(StackName="cfn-ecs-stack", TemplateBody=template)
+    res = cfn.list_stack_resources(StackName="cfn-ecs-stack")
+    summaries = res["StackResourceSummaries"]
+    assert any(r["ResourceType"] == "AWS::ECS::Cluster" for r in summaries)
+    assert all(r["ResourceStatus"] == "CREATE_COMPLETE" for r in summaries)
+
+
+def test_cfn_provision_cloudwatch_alarm(cfn):
+    """Stack with AWS::CloudWatch::Alarm provisions via CloudWatch handler."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "MyAlarm": {
+                "Type": "AWS::CloudWatch::Alarm",
+                "Properties": {
+                    "AlarmName": "cfn-test-alarm",
+                    "ComparisonOperator": "GreaterThanThreshold",
+                    "EvaluationPeriods": 1,
+                    "MetricName": "CPUUtilization",
+                    "Namespace": "AWS/EC2",
+                    "Period": 300,
+                    "Statistic": "Average",
+                    "Threshold": 80,
+                }
+            }
+        }
+    })
+    cfn.create_stack(StackName="cfn-cw-stack", TemplateBody=template)
+    res = cfn.list_stack_resources(StackName="cfn-cw-stack")
+    summaries = res["StackResourceSummaries"]
+    assert any(r["ResourceType"] == "AWS::CloudWatch::Alarm" for r in summaries)
+    assert all(r["ResourceStatus"] == "CREATE_COMPLETE" for r in summaries)
+
+
+def test_cfn_provision_stepfunctions_statemachine(cfn):
+    """Stack with AWS::StepFunctions::StateMachine provisions correctly."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "MySM": {
+                "Type": "AWS::StepFunctions::StateMachine",
+                "Properties": {
+                    "StateMachineName": "cfn-test-sm",
+                    "DefinitionString": json.dumps({
+                        "StartAt": "Pass",
+                        "States": {"Pass": {"Type": "Pass", "End": True}}
+                    }),
+                    "RoleArn": "arn:aws:iam::000000000000:role/StatesRole"
+                }
+            }
+        }
+    })
+    cfn.create_stack(StackName="cfn-sfn-stack", TemplateBody=template)
+    res = cfn.list_stack_resources(StackName="cfn-sfn-stack")
+    summaries = res["StackResourceSummaries"]
+    assert any(r["ResourceType"] == "AWS::StepFunctions::StateMachine" for r in summaries)
+    assert all(r["ResourceStatus"] == "CREATE_COMPLETE" for r in summaries)

@@ -369,6 +369,12 @@ def detect_service(method: str, path: str, headers: dict, query_params: dict) ->
             "ExecuteChangeSet": "cloudformation", "DeleteChangeSet": "cloudformation",
             "ListChangeSets": "cloudformation",
             "ListExports": "cloudformation", "ListImports": "cloudformation",
+            "CreateStackSet": "cloudformation", "DescribeStackSet": "cloudformation",
+            "UpdateStackSet": "cloudformation", "DeleteStackSet": "cloudformation",
+            "ListStackSets": "cloudformation",
+            "CreateStackInstances": "cloudformation",
+            "ListStackInstances": "cloudformation",
+            "DeleteStackInstances": "cloudformation",
         }
         if action in action_service_map:
             return action_service_map[action]

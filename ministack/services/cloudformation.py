@@ -7,7 +7,14 @@ Supports: CreateStack, DescribeStacks, DeleteStack, UpdateStack, ListStacks,
           DescribeStackEvents,
           CreateChangeSet, DescribeChangeSet, ExecuteChangeSet, DeleteChangeSet,
           ListChangeSets,
-          ListExports, ListImports.
+          ListExports, ListImports,
+          CreateStackSet, DescribeStackSet, UpdateStackSet, DeleteStackSet,
+          ListStackSets, CreateStackInstances, ListStackInstances,
+          DeleteStackInstances.
+
+Resource orchestration for: S3, SQS, SNS, DynamoDB, CloudWatch Logs, SSM,
+    SecretsManager, EventBridge, Lambda, IAM, Kinesis, Step Functions,
+    CloudWatch, EC2 (Instance/SG/VPC/Subnet), Route53, ECS.
 """
 
 import base64
@@ -48,6 +55,8 @@ _stacks: dict = {}        # stack_name -> stack record
 _events: dict = {}        # stack_name -> [event records]
 _change_sets: dict = {}   # change_set_id -> change set record
 _exports: dict = {}       # export_name -> {"Value": ..., "ExportingStackId": ...}
+_stack_sets: dict = {}    # stack_set_name -> stack set record
+_stack_set_ops: dict = {} # operation_id -> operation record
 
 
 def reset():
@@ -56,6 +65,8 @@ def reset():
     _events.clear()
     _change_sets.clear()
     _exports.clear()
+    _stack_sets.clear()
+    _stack_set_ops.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -861,6 +872,430 @@ async def _delete_events_rule(logical_id, physical_id, props, stack_name, ctx):
     await eventbridge.handle_request("POST", "/", hdrs, json.dumps(data).encode(), {})
 
 
+# -- Lambda Function --
+
+async def _provision_lambda_function(logical_id, props, stack_name, ctx):
+    from ministack.services import lambda_svc
+    func_name = props.get("FunctionName", f"{stack_name}-{logical_id}")
+    data = {"FunctionName": func_name}
+    if "Runtime" in props:
+        data["Runtime"] = props["Runtime"]
+    if "Handler" in props:
+        data["Handler"] = props["Handler"]
+    if "Role" in props:
+        data["Role"] = props["Role"]
+    else:
+        data["Role"] = f"arn:aws:iam::{ACCOUNT_ID}:role/{stack_name}-{logical_id}-role"
+    if "Code" in props:
+        code = props["Code"]
+        if isinstance(code, dict):
+            data["Code"] = code
+        else:
+            data["Code"] = {"ZipFile": ""}
+    else:
+        data["Code"] = {"ZipFile": ""}
+    if "Description" in props:
+        data["Description"] = props["Description"]
+    if "Timeout" in props:
+        data["Timeout"] = props["Timeout"]
+    if "MemorySize" in props:
+        data["MemorySize"] = props["MemorySize"]
+    if "Environment" in props:
+        data["Environment"] = props["Environment"]
+    if "Layers" in props:
+        data["Layers"] = props["Layers"]
+    if "Tags" in props and isinstance(props["Tags"], dict):
+        data["Tags"] = props["Tags"]
+
+    body_bytes = json.dumps(data).encode()
+    status, _, resp_body = await lambda_svc.handle_request(
+        "POST", "/2015-03-31/functions", {}, body_bytes, {})
+    arn = f"arn:aws:lambda:{REGION}:{ACCOUNT_ID}:function:{func_name}"
+    if status < 300:
+        try:
+            resp = json.loads(resp_body)
+            arn = resp.get("FunctionArn", arn)
+        except Exception:
+            pass
+    return arn, {"Arn": arn, "FunctionName": func_name}
+
+
+async def _delete_lambda_function(logical_id, physical_id, props, stack_name, ctx):
+    from ministack.services import lambda_svc
+    resources = ctx.get("resources", {})
+    res = resources.get(logical_id, {})
+    attrs = res.get("Attributes", {})
+    func_name = attrs.get("FunctionName") or props.get("FunctionName", logical_id)
+    await lambda_svc.handle_request("DELETE", f"/2015-03-31/functions/{func_name}", {}, b"", {})
+
+
+# -- IAM Role --
+
+async def _provision_iam_role(logical_id, props, stack_name, ctx):
+    from ministack.services.iam_sts import handle_iam_request
+    role_name = props.get("RoleName", f"{stack_name}-{logical_id}")
+    assume_doc = props.get("AssumeRolePolicyDocument", {})
+    if isinstance(assume_doc, dict):
+        assume_doc = json.dumps(assume_doc)
+    body = (f"Action=CreateRole&RoleName={role_name}"
+            f"&AssumeRolePolicyDocument={assume_doc}")
+    if "Path" in props:
+        body += f"&Path={props['Path']}"
+    if "Description" in props:
+        body += f"&Description={props['Description']}"
+    hdrs = {"content-type": "application/x-www-form-urlencoded"}
+    await handle_iam_request("POST", "/", hdrs, body.encode(), {})
+    arn = f"arn:aws:iam::{ACCOUNT_ID}:role/{role_name}"
+
+    # Attach managed policies
+    policies = props.get("ManagedPolicyArns", [])
+    for policy_arn in policies:
+        attach_body = f"Action=AttachRolePolicy&RoleName={role_name}&PolicyArn={policy_arn}"
+        await handle_iam_request("POST", "/", hdrs, attach_body.encode(), {})
+
+    return arn, {"Arn": arn, "RoleId": f"AROA{new_uuid()[:16].upper()}", "RoleName": role_name}
+
+
+async def _delete_iam_role(logical_id, physical_id, props, stack_name, ctx):
+    from ministack.services.iam_sts import handle_iam_request
+    resources = ctx.get("resources", {})
+    res = resources.get(logical_id, {})
+    attrs = res.get("Attributes", {})
+    role_name = attrs.get("RoleName") or props.get("RoleName", logical_id)
+    hdrs = {"content-type": "application/x-www-form-urlencoded"}
+
+    # Detach managed policies first
+    policies = props.get("ManagedPolicyArns", [])
+    for policy_arn in policies:
+        detach = f"Action=DetachRolePolicy&RoleName={role_name}&PolicyArn={policy_arn}"
+        await handle_iam_request("POST", "/", hdrs, detach.encode(), {})
+
+    body = f"Action=DeleteRole&RoleName={role_name}"
+    await handle_iam_request("POST", "/", hdrs, body.encode(), {})
+
+
+# -- Kinesis Stream --
+
+async def _provision_kinesis_stream(logical_id, props, stack_name, ctx):
+    from ministack.services import kinesis
+    stream_name = props.get("Name") or props.get("StreamName", f"{stack_name}-{logical_id}")
+    shard_count = props.get("ShardCount", 1)
+    data = {"StreamName": stream_name, "ShardCount": int(shard_count)}
+    if "StreamModeDetails" in props:
+        data["StreamModeDetails"] = props["StreamModeDetails"]
+    hdrs = {"x-amz-target": "Kinesis_20131202.CreateStream",
+            "content-type": "application/x-amz-json-1.1"}
+    await kinesis.handle_request("POST", "/", hdrs, json.dumps(data).encode(), {})
+    arn = f"arn:aws:kinesis:{REGION}:{ACCOUNT_ID}:stream/{stream_name}"
+    return arn, {"Arn": arn, "StreamName": stream_name}
+
+
+async def _delete_kinesis_stream(logical_id, physical_id, props, stack_name, ctx):
+    from ministack.services import kinesis
+    resources = ctx.get("resources", {})
+    res = resources.get(logical_id, {})
+    attrs = res.get("Attributes", {})
+    stream_name = (attrs.get("StreamName")
+                   or props.get("Name")
+                   or props.get("StreamName", logical_id))
+    data = {"StreamName": stream_name}
+    hdrs = {"x-amz-target": "Kinesis_20131202.DeleteStream",
+            "content-type": "application/x-amz-json-1.1"}
+    await kinesis.handle_request("POST", "/", hdrs, json.dumps(data).encode(), {})
+
+
+# -- Step Functions State Machine --
+
+async def _provision_state_machine(logical_id, props, stack_name, ctx):
+    from ministack.services import stepfunctions
+    sm_name = props.get("StateMachineName", f"{stack_name}-{logical_id}")
+    definition = props.get("DefinitionString") or props.get("Definition", "{}")
+    if isinstance(definition, dict):
+        definition = json.dumps(definition)
+    role_arn = props.get("RoleArn", f"arn:aws:iam::{ACCOUNT_ID}:role/StatesExecutionRole")
+    data = {
+        "name": sm_name,
+        "definition": definition,
+        "roleArn": role_arn,
+    }
+    if "StateMachineType" in props:
+        data["type"] = props["StateMachineType"]
+    hdrs = {"x-amz-target": "AWSStepFunctions.CreateStateMachine",
+            "content-type": "application/x-amz-json-1.0"}
+    status, _, resp_body = await stepfunctions.handle_request(
+        "POST", "/", hdrs, json.dumps(data).encode(), {})
+    arn = f"arn:aws:states:{REGION}:{ACCOUNT_ID}:stateMachine:{sm_name}"
+    if status < 300:
+        try:
+            resp = json.loads(resp_body)
+            arn = resp.get("stateMachineArn", arn)
+        except Exception:
+            pass
+    return arn, {"Arn": arn, "Name": sm_name, "StateMachineName": sm_name}
+
+
+async def _delete_state_machine(logical_id, physical_id, props, stack_name, ctx):
+    from ministack.services import stepfunctions
+    data = {"stateMachineArn": physical_id}
+    hdrs = {"x-amz-target": "AWSStepFunctions.DeleteStateMachine",
+            "content-type": "application/x-amz-json-1.0"}
+    await stepfunctions.handle_request("POST", "/", hdrs, json.dumps(data).encode(), {})
+
+
+# -- CloudWatch Alarm --
+
+async def _provision_cw_alarm(logical_id, props, stack_name, ctx):
+    from ministack.services import cloudwatch
+    alarm_name = props.get("AlarmName", f"{stack_name}-{logical_id}")
+    body_parts = [f"Action=PutMetricAlarm", f"AlarmName={alarm_name}"]
+    if "ComparisonOperator" in props:
+        body_parts.append(f"ComparisonOperator={props['ComparisonOperator']}")
+    if "EvaluationPeriods" in props:
+        body_parts.append(f"EvaluationPeriods={props['EvaluationPeriods']}")
+    if "MetricName" in props:
+        body_parts.append(f"MetricName={props['MetricName']}")
+    if "Namespace" in props:
+        body_parts.append(f"Namespace={props['Namespace']}")
+    if "Period" in props:
+        body_parts.append(f"Period={props['Period']}")
+    if "Statistic" in props:
+        body_parts.append(f"Statistic={props['Statistic']}")
+    if "Threshold" in props:
+        body_parts.append(f"Threshold={props['Threshold']}")
+    if "ActionsEnabled" in props:
+        body_parts.append(f"ActionsEnabled={'true' if props['ActionsEnabled'] else 'false'}")
+    if "AlarmDescription" in props:
+        body_parts.append(f"AlarmDescription={props['AlarmDescription']}")
+    if "TreatMissingData" in props:
+        body_parts.append(f"TreatMissingData={props['TreatMissingData']}")
+    body = "&".join(body_parts)
+    hdrs = {"content-type": "application/x-www-form-urlencoded"}
+    await cloudwatch.handle_request("POST", "/", hdrs, body.encode(), {})
+    arn = f"arn:aws:cloudwatch:{REGION}:{ACCOUNT_ID}:alarm:{alarm_name}"
+    return arn, {"Arn": arn, "AlarmName": alarm_name}
+
+
+async def _delete_cw_alarm(logical_id, physical_id, props, stack_name, ctx):
+    from ministack.services import cloudwatch
+    resources = ctx.get("resources", {})
+    res = resources.get(logical_id, {})
+    attrs = res.get("Attributes", {})
+    alarm_name = attrs.get("AlarmName") or props.get("AlarmName", logical_id)
+    body = f"Action=DeleteAlarms&AlarmNames.member.1={alarm_name}"
+    hdrs = {"content-type": "application/x-www-form-urlencoded"}
+    await cloudwatch.handle_request("POST", "/", hdrs, body.encode(), {})
+
+
+# -- EC2 Instance --
+
+async def _provision_ec2_instance(logical_id, props, stack_name, ctx):
+    from ministack.services import ec2
+    from urllib.parse import urlencode
+    params = {"Action": "RunInstances", "ImageId": props.get("ImageId", "ami-00000001"),
+              "MinCount": "1", "MaxCount": "1"}
+    if "InstanceType" in props:
+        params["InstanceType"] = props["InstanceType"]
+    if "KeyName" in props:
+        params["KeyName"] = props["KeyName"]
+    if "SubnetId" in props:
+        params["SubnetId"] = props["SubnetId"]
+    if "SecurityGroupIds" in props:
+        for i, sg in enumerate(props["SecurityGroupIds"], 1):
+            params[f"SecurityGroupId.{i}"] = sg
+    body = urlencode(params)
+    hdrs = {"content-type": "application/x-www-form-urlencoded"}
+    status, _, resp_body = await ec2.handle_request("POST", "/", hdrs, body.encode(), {})
+    instance_id = f"i-{new_uuid()[:17].replace('-', '')}"
+    if status < 300 and resp_body:
+        raw = resp_body if isinstance(resp_body, str) else resp_body.decode("utf-8", errors="replace")
+        import re as _re
+        m = _re.search(r"<instanceId>(i-[a-f0-9]+)</instanceId>", raw)
+        if m:
+            instance_id = m.group(1)
+    return instance_id, {"InstanceId": instance_id,
+                         "AvailabilityZone": f"{REGION}a",
+                         "PrivateDnsName": f"ip-10-0-0-1.{REGION}.compute.internal",
+                         "PublicDnsName": ""}
+
+
+async def _delete_ec2_instance(logical_id, physical_id, props, stack_name, ctx):
+    from ministack.services import ec2
+    from urllib.parse import urlencode
+    body = urlencode({"Action": "TerminateInstances", "InstanceId.1": physical_id})
+    hdrs = {"content-type": "application/x-www-form-urlencoded"}
+    await ec2.handle_request("POST", "/", hdrs, body.encode(), {})
+
+
+# -- EC2 Security Group --
+
+async def _provision_ec2_sg(logical_id, props, stack_name, ctx):
+    from ministack.services import ec2
+    from urllib.parse import urlencode
+    group_name = props.get("GroupName", f"{stack_name}-{logical_id}")
+    description = props.get("GroupDescription", f"Created by CloudFormation stack {stack_name}")
+    params = {"Action": "CreateSecurityGroup",
+              "GroupName": group_name,
+              "GroupDescription": description}
+    if "VpcId" in props:
+        params["VpcId"] = props["VpcId"]
+    body = urlencode(params)
+    hdrs = {"content-type": "application/x-www-form-urlencoded"}
+    status, _, resp_body = await ec2.handle_request("POST", "/", hdrs, body.encode(), {})
+    group_id = f"sg-{new_uuid()[:8]}"
+    if status < 300 and resp_body:
+        raw = resp_body if isinstance(resp_body, str) else resp_body.decode("utf-8", errors="replace")
+        import re as _re
+        m = _re.search(r"<groupId>(sg-[a-f0-9]+)</groupId>", raw)
+        if m:
+            group_id = m.group(1)
+    vpc_id = props.get("VpcId", "vpc-00000001")
+    return group_id, {"GroupId": group_id, "GroupName": group_name, "VpcId": vpc_id}
+
+
+async def _delete_ec2_sg(logical_id, physical_id, props, stack_name, ctx):
+    from ministack.services import ec2
+    from urllib.parse import urlencode
+    body = urlencode({"Action": "DeleteSecurityGroup", "GroupId": physical_id})
+    hdrs = {"content-type": "application/x-www-form-urlencoded"}
+    await ec2.handle_request("POST", "/", hdrs, body.encode(), {})
+
+
+# -- EC2 VPC --
+
+async def _provision_ec2_vpc(logical_id, props, stack_name, ctx):
+    from ministack.services import ec2
+    from urllib.parse import urlencode
+    cidr = props.get("CidrBlock", "10.0.0.0/16")
+    params = {"Action": "CreateVpc", "CidrBlock": cidr}
+    if "EnableDnsSupport" in props:
+        params["EnableDnsSupport"] = str(props["EnableDnsSupport"]).lower()
+    if "EnableDnsHostnames" in props:
+        params["EnableDnsHostnames"] = str(props["EnableDnsHostnames"]).lower()
+    body = urlencode(params)
+    hdrs = {"content-type": "application/x-www-form-urlencoded"}
+    status, _, resp_body = await ec2.handle_request("POST", "/", hdrs, body.encode(), {})
+    vpc_id = f"vpc-{new_uuid()[:8]}"
+    if status < 300 and resp_body:
+        raw = resp_body if isinstance(resp_body, str) else resp_body.decode("utf-8", errors="replace")
+        import re as _re
+        m = _re.search(r"<vpcId>(vpc-[a-f0-9]+)</vpcId>", raw)
+        if m:
+            vpc_id = m.group(1)
+    return vpc_id, {"VpcId": vpc_id, "CidrBlock": cidr,
+                    "DefaultNetworkAcl": f"acl-{new_uuid()[:8]}",
+                    "DefaultSecurityGroup": f"sg-{new_uuid()[:8]}"}
+
+
+async def _delete_ec2_vpc(logical_id, physical_id, props, stack_name, ctx):
+    from ministack.services import ec2
+    from urllib.parse import urlencode
+    body = urlencode({"Action": "DeleteVpc", "VpcId": physical_id})
+    hdrs = {"content-type": "application/x-www-form-urlencoded"}
+    await ec2.handle_request("POST", "/", hdrs, body.encode(), {})
+
+
+# -- EC2 Subnet --
+
+async def _provision_ec2_subnet(logical_id, props, stack_name, ctx):
+    from ministack.services import ec2
+    from urllib.parse import urlencode
+    vpc_id = props.get("VpcId", "vpc-00000001")
+    cidr = props.get("CidrBlock", "10.0.0.0/24")
+    params = {"Action": "CreateSubnet", "VpcId": vpc_id, "CidrBlock": cidr}
+    if "AvailabilityZone" in props:
+        params["AvailabilityZone"] = props["AvailabilityZone"]
+    body = urlencode(params)
+    hdrs = {"content-type": "application/x-www-form-urlencoded"}
+    status, _, resp_body = await ec2.handle_request("POST", "/", hdrs, body.encode(), {})
+    subnet_id = f"subnet-{new_uuid()[:8]}"
+    if status < 300 and resp_body:
+        raw = resp_body if isinstance(resp_body, str) else resp_body.decode("utf-8", errors="replace")
+        import re as _re
+        m = _re.search(r"<subnetId>(subnet-[a-f0-9]+)</subnetId>", raw)
+        if m:
+            subnet_id = m.group(1)
+    az = props.get("AvailabilityZone", f"{REGION}a")
+    return subnet_id, {"SubnetId": subnet_id, "VpcId": vpc_id,
+                       "CidrBlock": cidr, "AvailabilityZone": az}
+
+
+async def _delete_ec2_subnet(logical_id, physical_id, props, stack_name, ctx):
+    from ministack.services import ec2
+    from urllib.parse import urlencode
+    body = urlencode({"Action": "DeleteSubnet", "SubnetId": physical_id})
+    hdrs = {"content-type": "application/x-www-form-urlencoded"}
+    await ec2.handle_request("POST", "/", hdrs, body.encode(), {})
+
+
+# -- Route53 Hosted Zone --
+
+async def _provision_route53_zone(logical_id, props, stack_name, ctx):
+    from ministack.services import route53
+    zone_name = props.get("Name", f"{stack_name}.{logical_id}.local")
+    data = {
+        "Name": zone_name,
+        "CallerReference": new_uuid(),
+    }
+    if "HostedZoneConfig" in props:
+        cfg = props["HostedZoneConfig"]
+        if isinstance(cfg, dict) and "Comment" in cfg:
+            data["HostedZoneConfig"] = {"Comment": cfg["Comment"]}
+    body_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">'
+        f'<Name>{zone_name}</Name>'
+        f'<CallerReference>{data["CallerReference"]}</CallerReference>'
+        '</CreateHostedZoneRequest>'
+    )
+    status, _, resp_body = await route53.handle_request(
+        "POST", "/2013-04-01/hostedzone", {}, body_xml.encode(), {})
+    zone_id = f"Z{new_uuid()[:13].upper().replace('-', '')}"
+    if status < 300 and resp_body:
+        raw = resp_body if isinstance(resp_body, str) else resp_body.decode("utf-8", errors="replace")
+        import re as _re
+        m = _re.search(r"<Id>(/hostedzone/)?([A-Z0-9]+)</Id>", raw)
+        if m:
+            zone_id = m.group(2)
+    return zone_id, {"HostedZoneId": zone_id, "NameServers": ["ns-1.example.com", "ns-2.example.com"]}
+
+
+async def _delete_route53_zone(logical_id, physical_id, props, stack_name, ctx):
+    from ministack.services import route53
+    zone_id = physical_id
+    await route53.handle_request("DELETE", f"/2013-04-01/hostedzone/{zone_id}", {}, b"", {})
+
+
+# -- ECS Cluster --
+
+async def _provision_ecs_cluster(logical_id, props, stack_name, ctx):
+    from ministack.services import ecs
+    cluster_name = props.get("ClusterName", f"{stack_name}-{logical_id}")
+    data = {"clusterName": cluster_name}
+    if "CapacityProviders" in props:
+        data["capacityProviders"] = props["CapacityProviders"]
+    hdrs = {"x-amz-target": "AmazonEC2ContainerServiceV20141113.CreateCluster",
+            "content-type": "application/x-amz-json-1.1"}
+    status, _, resp_body = await ecs.handle_request("POST", "/", hdrs,
+                                                    json.dumps(data).encode(), {})
+    arn = f"arn:aws:ecs:{REGION}:{ACCOUNT_ID}:cluster/{cluster_name}"
+    if status < 300:
+        try:
+            resp = json.loads(resp_body)
+            cluster = resp.get("cluster", {})
+            arn = cluster.get("clusterArn", arn)
+        except Exception:
+            pass
+    return arn, {"Arn": arn, "ClusterName": cluster_name}
+
+
+async def _delete_ecs_cluster(logical_id, physical_id, props, stack_name, ctx):
+    from ministack.services import ecs
+    data = {"cluster": physical_id}
+    hdrs = {"x-amz-target": "AmazonEC2ContainerServiceV20141113.DeleteCluster",
+            "content-type": "application/x-amz-json-1.1"}
+    await ecs.handle_request("POST", "/", hdrs, json.dumps(data).encode(), {})
+
+
 _RESOURCE_HANDLERS = {
     "AWS::S3::Bucket": _provision_s3_bucket,
     "AWS::SQS::Queue": _provision_sqs_queue,
@@ -870,6 +1305,17 @@ _RESOURCE_HANDLERS = {
     "AWS::SSM::Parameter": _provision_ssm_parameter,
     "AWS::SecretsManager::Secret": _provision_secret,
     "AWS::Events::Rule": _provision_events_rule,
+    "AWS::Lambda::Function": _provision_lambda_function,
+    "AWS::IAM::Role": _provision_iam_role,
+    "AWS::Kinesis::Stream": _provision_kinesis_stream,
+    "AWS::StepFunctions::StateMachine": _provision_state_machine,
+    "AWS::CloudWatch::Alarm": _provision_cw_alarm,
+    "AWS::EC2::Instance": _provision_ec2_instance,
+    "AWS::EC2::SecurityGroup": _provision_ec2_sg,
+    "AWS::EC2::VPC": _provision_ec2_vpc,
+    "AWS::EC2::Subnet": _provision_ec2_subnet,
+    "AWS::Route53::HostedZone": _provision_route53_zone,
+    "AWS::ECS::Cluster": _provision_ecs_cluster,
 }
 
 _RESOURCE_DELETE_HANDLERS = {
@@ -881,6 +1327,17 @@ _RESOURCE_DELETE_HANDLERS = {
     "AWS::SSM::Parameter": _delete_ssm_parameter,
     "AWS::SecretsManager::Secret": _delete_secret,
     "AWS::Events::Rule": _delete_events_rule,
+    "AWS::Lambda::Function": _delete_lambda_function,
+    "AWS::IAM::Role": _delete_iam_role,
+    "AWS::Kinesis::Stream": _delete_kinesis_stream,
+    "AWS::StepFunctions::StateMachine": _delete_state_machine,
+    "AWS::CloudWatch::Alarm": _delete_cw_alarm,
+    "AWS::EC2::Instance": _delete_ec2_instance,
+    "AWS::EC2::SecurityGroup": _delete_ec2_sg,
+    "AWS::EC2::VPC": _delete_ec2_vpc,
+    "AWS::EC2::Subnet": _delete_ec2_subnet,
+    "AWS::Route53::HostedZone": _delete_route53_zone,
+    "AWS::ECS::Cluster": _delete_ecs_cluster,
 }
 
 
@@ -2273,6 +2730,276 @@ def _list_imports(params):
 
 
 # ---------------------------------------------------------------------------
+# StackSets API
+# ---------------------------------------------------------------------------
+
+async def _create_stack_set(params):
+    """CreateStackSet — create a new stack set."""
+    ss_name = _p(params, "StackSetName")
+    if not ss_name:
+        return _error("ValidationError", "StackSetName is required", 400)
+    if ss_name in _stack_sets:
+        return _error("NameAlreadyExistsException",
+                       f"StackSet with name {ss_name} already exists", 409)
+
+    template_body = _p(params, "TemplateBody", None)
+    template = _parse_template(template_body) if template_body else {}
+    description = template.get("Description", _p(params, "Description", ""))
+
+    ss_id = new_uuid()
+    arn = f"arn:aws:cloudformation:{REGION}:{ACCOUNT_ID}:stackset/{ss_name}:{ss_id}"
+    now = now_iso()
+
+    stack_set_params = _collect_parameters(params)
+    tags = _collect_indexed(params, "Tags")
+    capabilities = _collect_list(params, "Capabilities")
+    admin_role = _p(params, "AdministrationRoleARN",
+                    f"arn:aws:iam::{ACCOUNT_ID}:role/AWSCloudFormationStackSetAdministrationRole")
+    exec_role = _p(params, "ExecutionRoleName", "AWSCloudFormationStackSetExecutionRole")
+    perm_model = _p(params, "PermissionModel", "SELF_MANAGED")
+
+    rec = {
+        "StackSetId": ss_id,
+        "StackSetName": ss_name,
+        "StackSetARN": arn,
+        "Description": description,
+        "Status": "ACTIVE",
+        "TemplateBody": template_body or json.dumps(template),
+        "Parameters": stack_set_params,
+        "Tags": tags,
+        "Capabilities": capabilities,
+        "AdministrationRoleARN": admin_role,
+        "ExecutionRoleName": exec_role,
+        "PermissionModel": perm_model,
+        "CreationTime": now,
+        "Instances": {},  # (account, region) -> instance record
+    }
+    _stack_sets[ss_name] = rec
+
+    inner = f"<CreateStackSetResult><StackSetId>{_esc(ss_id)}</StackSetId></CreateStackSetResult>"
+    return _xml(200, "CreateStackSetResponse", inner)
+
+
+def _describe_stack_set(params):
+    """DescribeStackSet — describe a stack set."""
+    ss_name = _p(params, "StackSetName")
+    rec = _stack_sets.get(ss_name)
+    if not rec:
+        return _error("StackSetNotFoundException",
+                       f"StackSet [{ss_name}] does not exist", 404)
+
+    params_xml = ""
+    for p in rec.get("Parameters", []):
+        params_xml += (f"<member><ParameterKey>{_esc(p['ParameterKey'])}</ParameterKey>"
+                       f"<ParameterValue>{_esc(p['ParameterValue'])}</ParameterValue></member>")
+    tags_xml = ""
+    for t in rec.get("Tags", []):
+        tags_xml += (f"<member><Key>{_esc(t['Key'])}</Key>"
+                     f"<Value>{_esc(t['Value'])}</Value></member>")
+    caps_xml = ""
+    for c in rec.get("Capabilities", []):
+        caps_xml += f"<member>{_esc(c)}</member>"
+
+    inner = (
+        f"<DescribeStackSetResult><StackSet>"
+        f"<StackSetName>{_esc(rec['StackSetName'])}</StackSetName>"
+        f"<StackSetId>{_esc(rec['StackSetId'])}</StackSetId>"
+        f"<StackSetARN>{_esc(rec['StackSetARN'])}</StackSetARN>"
+        f"<Description>{_esc(rec.get('Description', ''))}</Description>"
+        f"<Status>{_esc(rec['Status'])}</Status>"
+        f"<TemplateBody>{_esc(rec.get('TemplateBody', ''))}</TemplateBody>"
+        f"<Parameters>{params_xml}</Parameters>"
+        f"<Tags>{tags_xml}</Tags>"
+        f"<Capabilities>{caps_xml}</Capabilities>"
+        f"<AdministrationRoleARN>{_esc(rec.get('AdministrationRoleARN', ''))}</AdministrationRoleARN>"
+        f"<ExecutionRoleName>{_esc(rec.get('ExecutionRoleName', ''))}</ExecutionRoleName>"
+        f"<PermissionModel>{_esc(rec.get('PermissionModel', ''))}</PermissionModel>"
+        f"</StackSet></DescribeStackSetResult>"
+    )
+    return _xml(200, "DescribeStackSetResponse", inner)
+
+
+async def _update_stack_set(params):
+    """UpdateStackSet — update a stack set definition."""
+    ss_name = _p(params, "StackSetName")
+    rec = _stack_sets.get(ss_name)
+    if not rec:
+        return _error("StackSetNotFoundException",
+                       f"StackSet [{ss_name}] does not exist", 404)
+
+    template_body = _p(params, "TemplateBody", None)
+    if template_body:
+        rec["TemplateBody"] = template_body
+    new_params = _collect_parameters(params)
+    if new_params:
+        rec["Parameters"] = new_params
+    desc = _p(params, "Description", None)
+    if desc is not None:
+        rec["Description"] = desc
+    new_tags = _collect_indexed(params, "Tags")
+    if new_tags:
+        rec["Tags"] = new_tags
+    admin_role = _p(params, "AdministrationRoleARN", None)
+    if admin_role:
+        rec["AdministrationRoleARN"] = admin_role
+    exec_role = _p(params, "ExecutionRoleName", None)
+    if exec_role:
+        rec["ExecutionRoleName"] = exec_role
+
+    op_id = new_uuid()
+    _stack_set_ops[op_id] = {
+        "OperationId": op_id,
+        "StackSetName": ss_name,
+        "Action": "UPDATE",
+        "Status": "SUCCEEDED",
+        "CreationTimestamp": now_iso(),
+        "EndTimestamp": now_iso(),
+    }
+
+    inner = f"<UpdateStackSetResult><OperationId>{_esc(op_id)}</OperationId></UpdateStackSetResult>"
+    return _xml(200, "UpdateStackSetResponse", inner)
+
+
+async def _delete_stack_set(params):
+    """DeleteStackSet — delete a stack set (must have no instances)."""
+    ss_name = _p(params, "StackSetName")
+    rec = _stack_sets.get(ss_name)
+    if not rec:
+        return _error("StackSetNotFoundException",
+                       f"StackSet [{ss_name}] does not exist", 404)
+    if rec.get("Instances"):
+        return _error("StackSetNotEmptyException",
+                       "You must delete all stack instances before deleting a stack set", 400)
+    del _stack_sets[ss_name]
+    inner = "<DeleteStackSetResult/>"
+    return _xml(200, "DeleteStackSetResponse", inner)
+
+
+def _list_stack_sets(params):
+    """ListStackSets — list all stack sets."""
+    status_filter = _p(params, "Status", "ACTIVE")
+    summaries = ""
+    for rec in _stack_sets.values():
+        if status_filter and rec.get("Status") != status_filter:
+            continue
+        summaries += (
+            f"<member>"
+            f"<StackSetName>{_esc(rec['StackSetName'])}</StackSetName>"
+            f"<StackSetId>{_esc(rec['StackSetId'])}</StackSetId>"
+            f"<Description>{_esc(rec.get('Description', ''))}</Description>"
+            f"<Status>{_esc(rec['Status'])}</Status>"
+            f"<PermissionModel>{_esc(rec.get('PermissionModel', ''))}</PermissionModel>"
+            f"</member>"
+        )
+    inner = f"<ListStackSetsResult><Summaries>{summaries}</Summaries></ListStackSetsResult>"
+    return _xml(200, "ListStackSetsResponse", inner)
+
+
+async def _create_stack_instances(params):
+    """CreateStackInstances — deploy instances to target accounts/regions."""
+    ss_name = _p(params, "StackSetName")
+    rec = _stack_sets.get(ss_name)
+    if not rec:
+        return _error("StackSetNotFoundException",
+                       f"StackSet [{ss_name}] does not exist", 404)
+
+    accounts = _collect_list(params, "Accounts")
+    regions = _collect_list(params, "Regions")
+    if not accounts:
+        accounts = [ACCOUNT_ID]
+    if not regions:
+        regions = [REGION]
+
+    now = now_iso()
+    instances = rec.setdefault("Instances", {})
+    for acct in accounts:
+        for rgn in regions:
+            key = (acct, rgn)
+            instances[key] = {
+                "StackSetId": rec["StackSetId"],
+                "Account": acct,
+                "Region": rgn,
+                "Status": "CURRENT",
+                "StackId": f"arn:aws:cloudformation:{rgn}:{acct}:stack/"
+                           f"StackSet-{ss_name}-{new_uuid()[:8]}/{new_uuid()}",
+                "StatusReason": "",
+                "LastUpdatedTime": now,
+            }
+
+    op_id = new_uuid()
+    _stack_set_ops[op_id] = {
+        "OperationId": op_id,
+        "StackSetName": ss_name,
+        "Action": "CREATE",
+        "Status": "SUCCEEDED",
+        "CreationTimestamp": now,
+        "EndTimestamp": now,
+    }
+
+    inner = f"<CreateStackInstancesResult><OperationId>{_esc(op_id)}</OperationId></CreateStackInstancesResult>"
+    return _xml(200, "CreateStackInstancesResponse", inner)
+
+
+def _list_stack_instances(params):
+    """ListStackInstances — list instances for a stack set."""
+    ss_name = _p(params, "StackSetName")
+    rec = _stack_sets.get(ss_name)
+    if not rec:
+        return _error("StackSetNotFoundException",
+                       f"StackSet [{ss_name}] does not exist", 404)
+
+    account_filter = _p(params, "StackInstanceAccount", None)
+    region_filter = _p(params, "StackInstanceRegion", None)
+    summaries = ""
+    for (_acct, _rgn), inst in rec.get("Instances", {}).items():
+        if account_filter and _acct != account_filter:
+            continue
+        if region_filter and _rgn != region_filter:
+            continue
+        summaries += (
+            f"<member>"
+            f"<StackSetId>{_esc(inst['StackSetId'])}</StackSetId>"
+            f"<Account>{_esc(inst['Account'])}</Account>"
+            f"<Region>{_esc(inst['Region'])}</Region>"
+            f"<Status>{_esc(inst['Status'])}</Status>"
+            f"<StackId>{_esc(inst.get('StackId', ''))}</StackId>"
+            f"</member>"
+        )
+    inner = f"<ListStackInstancesResult><Summaries>{summaries}</Summaries></ListStackInstancesResult>"
+    return _xml(200, "ListStackInstancesResponse", inner)
+
+
+async def _delete_stack_instances(params):
+    """DeleteStackInstances — remove stack instances from target accounts/regions."""
+    ss_name = _p(params, "StackSetName")
+    rec = _stack_sets.get(ss_name)
+    if not rec:
+        return _error("StackSetNotFoundException",
+                       f"StackSet [{ss_name}] does not exist", 404)
+
+    accounts = _collect_list(params, "Accounts")
+    regions = _collect_list(params, "Regions")
+    instances = rec.get("Instances", {})
+    for acct in accounts:
+        for rgn in regions:
+            instances.pop((acct, rgn), None)
+
+    op_id = new_uuid()
+    now = now_iso()
+    _stack_set_ops[op_id] = {
+        "OperationId": op_id,
+        "StackSetName": ss_name,
+        "Action": "DELETE",
+        "Status": "SUCCEEDED",
+        "CreationTimestamp": now,
+        "EndTimestamp": now,
+    }
+
+    inner = f"<DeleteStackInstancesResult><OperationId>{_esc(op_id)}</OperationId></DeleteStackInstancesResult>"
+    return _xml(200, "DeleteStackInstancesResponse", inner)
+
+
+# ---------------------------------------------------------------------------
 # Action dispatch map
 # ---------------------------------------------------------------------------
 
@@ -2301,12 +3028,23 @@ _ACTION_MAP = {
     # Export operations
     "ListExports": _list_exports,
     "ListImports": _list_imports,
+    # StackSet operations
+    "CreateStackSet": _create_stack_set,
+    "DescribeStackSet": _describe_stack_set,
+    "UpdateStackSet": _update_stack_set,
+    "DeleteStackSet": _delete_stack_set,
+    "ListStackSets": _list_stack_sets,
+    "CreateStackInstances": _create_stack_instances,
+    "ListStackInstances": _list_stack_instances,
+    "DeleteStackInstances": _delete_stack_instances,
 }
 
 # Handlers that are coroutines (async)
 _ASYNC_ACTIONS = {
     "CreateStack", "UpdateStack", "DeleteStack",
     "CreateChangeSet", "ExecuteChangeSet",
+    "CreateStackSet", "UpdateStackSet", "DeleteStackSet",
+    "CreateStackInstances", "DeleteStackInstances",
 }
 
 
