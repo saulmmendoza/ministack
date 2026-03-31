@@ -779,10 +779,10 @@ async def _provision_secret(logical_id, props, stack_name, ctx):
         data["SecretString"] = props["SecretString"]
     elif "GenerateSecretString" in props:
         import string as _string
-        import random as _random
+        import secrets as _secrets
         length = props["GenerateSecretString"].get("PasswordLength", 32)
         charset = _string.ascii_letters + _string.digits + "!@#$%^&*()"
-        data["SecretString"] = "".join(_random.choice(charset) for _ in range(int(length)))
+        data["SecretString"] = "".join(_secrets.choice(charset) for _ in range(int(length)))
     else:
         data["SecretString"] = new_uuid()
     if "Tags" in props and isinstance(props["Tags"], list):
