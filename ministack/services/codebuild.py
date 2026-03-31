@@ -205,7 +205,7 @@ def _make_build(project_name, overrides: dict) -> dict:
         "startTime": now_iso(),
         "endTime": None,
         "currentPhase": "QUEUED",
-        "buildStatus": "IN_PROGRESS",
+        "buildStatus": "QUEUED",
         "sourceVersion": overrides.get("sourceVersion", project.get("source", {}).get("location", "")),
         "resolvedSourceVersion": None,
         "projectName": project_name,
@@ -233,6 +233,10 @@ def _make_build(project_name, overrides: dict) -> dict:
 
 def _run_build_async(build_id: str):
     """Simulate build execution in a background thread."""
+    build = _builds.get(build_id)
+    if build:
+        build["buildStatus"] = "IN_PROGRESS"
+        build["currentPhase"] = "BUILD"
     time.sleep(BUILD_RUN_SECONDS)
     build = _builds.get(build_id)
     if not build:

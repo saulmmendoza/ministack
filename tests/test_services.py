@@ -14980,7 +14980,7 @@ def test_codebuild_start_and_get_build(codebuild):
     start_resp = codebuild.start_build(projectName="cb-build-project")
     build_id = start_resp["build"]["id"]
     assert build_id.startswith("cb-build-project:")
-    assert start_resp["build"]["buildStatus"] == "IN_PROGRESS"
+    assert start_resp["build"]["buildStatus"] in ("QUEUED", "IN_PROGRESS")
 
     get_resp = codebuild.batch_get_builds(ids=[build_id])
     assert len(get_resp["builds"]) == 1
