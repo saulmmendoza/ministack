@@ -14866,3 +14866,406 @@ def test_cfn_provision_stepfunctions_statemachine(cfn):
     summaries = res["StackResourceSummaries"]
     assert any(r["ResourceType"] == "AWS::StepFunctions::StateMachine" for r in summaries)
     assert all(r["ResourceStatus"] == "CREATE_COMPLETE" for r in summaries)
+
+
+# ========== CloudFront ==========
+
+
+def test_cloudfront_create_list_get_distribution(cf):
+    resp = cf.create_distribution(
+        DistributionConfig={
+            "CallerReference": "cf-intg-1",
+            "Origins": {
+                "Quantity": 1,
+                "Items": [
+                    {
+                        "Id": "myorigin",
+                        "DomainName": "example.com",
+                        "CustomOriginConfig": {
+                            "HTTPPort": 80,
+                            "HTTPSPort": 443,
+                            "OriginProtocolPolicy": "https-only",
+                        },
+                    }
+                ],
+            },
+            "DefaultCacheBehavior": {
+                "TargetOriginId": "myorigin",
+                "ViewerProtocolPolicy": "redirect-to-https",
+                "TrustedSigners": {"Enabled": False, "Quantity": 0},
+                "ForwardedValues": {
+                    "QueryString": False,
+                    "Cookies": {"Forward": "none"},
+                },
+                "MinTTL": 0,
+            },
+            "Comment": "Test distribution",
+            "Enabled": True,
+        }
+    )
+    dist = resp["Distribution"]
+    dist_id = dist["Id"]
+    assert dist_id
+    assert dist["DomainName"].endswith(".cloudfront.net")
+    assert dist["Status"] == "Deployed"
+    assert dist["ARN"].startswith("arn:aws:cloudfront::")
+
+    # list
+    list_resp = cf.list_distributions()
+    items = list_resp["DistributionList"].get("Items", [])
+    assert any(d["Id"] == dist_id for d in items)
+
+    # get
+    get_resp = cf.get_distribution(Id=dist_id)
+    assert get_resp["Distribution"]["Id"] == dist_id
+    assert get_resp["Distribution"]["DistributionConfig"]["Comment"] == "Test distribution"
+
+
+def test_cloudfront_get_distribution_config(cf):
+    resp = cf.create_distribution(
+        DistributionConfig={
+            "CallerReference": "cf-intg-cfg",
+            "Origins": {
+                "Quantity": 1,
+                "Items": [
+                    {
+                        "Id": "origin-cfg",
+                        "DomainName": "cfg.example.com",
+                        "CustomOriginConfig": {
+                            "HTTPPort": 80,
+                            "HTTPSPort": 443,
+                            "OriginProtocolPolicy": "https-only",
+                        },
+                    }
+                ],
+            },
+            "DefaultCacheBehavior": {
+                "TargetOriginId": "origin-cfg",
+                "ViewerProtocolPolicy": "allow-all",
+                "TrustedSigners": {"Enabled": False, "Quantity": 0},
+                "ForwardedValues": {
+                    "QueryString": False,
+                    "Cookies": {"Forward": "none"},
+                },
+                "MinTTL": 0,
+            },
+            "Comment": "config test",
+            "Enabled": True,
+        }
+    )
+    dist_id = resp["Distribution"]["Id"]
+    cfg_resp = cf.get_distribution_config(Id=dist_id)
+    assert cfg_resp["DistributionConfig"]["Comment"] == "config test"
+    assert "ETag" in cfg_resp
+
+
+def test_cloudfront_update_distribution(cf):
+    create_resp = cf.create_distribution(
+        DistributionConfig={
+            "CallerReference": "cf-intg-update",
+            "Origins": {
+                "Quantity": 1,
+                "Items": [
+                    {
+                        "Id": "origin-upd",
+                        "DomainName": "update.example.com",
+                        "CustomOriginConfig": {
+                            "HTTPPort": 80,
+                            "HTTPSPort": 443,
+                            "OriginProtocolPolicy": "https-only",
+                        },
+                    }
+                ],
+            },
+            "DefaultCacheBehavior": {
+                "TargetOriginId": "origin-upd",
+                "ViewerProtocolPolicy": "allow-all",
+                "TrustedSigners": {"Enabled": False, "Quantity": 0},
+                "ForwardedValues": {
+                    "QueryString": False,
+                    "Cookies": {"Forward": "none"},
+                },
+                "MinTTL": 0,
+            },
+            "Comment": "before update",
+            "Enabled": True,
+        }
+    )
+    dist_id = create_resp["Distribution"]["Id"]
+    etag = create_resp["ETag"]
+
+    update_resp = cf.update_distribution(
+        Id=dist_id,
+        IfMatch=etag,
+        DistributionConfig={
+            "CallerReference": "cf-intg-update",
+            "Origins": {
+                "Quantity": 1,
+                "Items": [
+                    {
+                        "Id": "origin-upd",
+                        "DomainName": "update.example.com",
+                        "CustomOriginConfig": {
+                            "HTTPPort": 80,
+                            "HTTPSPort": 443,
+                            "OriginProtocolPolicy": "https-only",
+                        },
+                    }
+                ],
+            },
+            "DefaultCacheBehavior": {
+                "TargetOriginId": "origin-upd",
+                "ViewerProtocolPolicy": "redirect-to-https",
+                "TrustedSigners": {"Enabled": False, "Quantity": 0},
+                "ForwardedValues": {
+                    "QueryString": False,
+                    "Cookies": {"Forward": "none"},
+                },
+                "MinTTL": 0,
+            },
+            "Comment": "after update",
+            "Enabled": True,
+        },
+    )
+    assert update_resp["Distribution"]["DistributionConfig"]["Comment"] == "after update"
+    assert update_resp["ETag"] != etag
+
+
+def test_cloudfront_delete_distribution(cf):
+    create_resp = cf.create_distribution(
+        DistributionConfig={
+            "CallerReference": "cf-intg-delete",
+            "Origins": {
+                "Quantity": 1,
+                "Items": [
+                    {
+                        "Id": "origin-del",
+                        "DomainName": "delete.example.com",
+                        "CustomOriginConfig": {
+                            "HTTPPort": 80,
+                            "HTTPSPort": 443,
+                            "OriginProtocolPolicy": "https-only",
+                        },
+                    }
+                ],
+            },
+            "DefaultCacheBehavior": {
+                "TargetOriginId": "origin-del",
+                "ViewerProtocolPolicy": "allow-all",
+                "TrustedSigners": {"Enabled": False, "Quantity": 0},
+                "ForwardedValues": {
+                    "QueryString": False,
+                    "Cookies": {"Forward": "none"},
+                },
+                "MinTTL": 0,
+            },
+            "Comment": "to delete",
+            "Enabled": False,
+        }
+    )
+    dist_id = create_resp["Distribution"]["Id"]
+    etag = create_resp["ETag"]
+
+    cf.delete_distribution(Id=dist_id, IfMatch=etag)
+
+    with pytest.raises(ClientError) as exc:
+        cf.get_distribution(Id=dist_id)
+    assert exc.value.response["Error"]["Code"] in ("NoSuchDistribution", "404")
+
+
+def test_cloudfront_invalidation(cf):
+    dist_resp = cf.create_distribution(
+        DistributionConfig={
+            "CallerReference": "cf-intg-inv",
+            "Origins": {
+                "Quantity": 1,
+                "Items": [
+                    {
+                        "Id": "origin-inv",
+                        "DomainName": "inv.example.com",
+                        "CustomOriginConfig": {
+                            "HTTPPort": 80,
+                            "HTTPSPort": 443,
+                            "OriginProtocolPolicy": "https-only",
+                        },
+                    }
+                ],
+            },
+            "DefaultCacheBehavior": {
+                "TargetOriginId": "origin-inv",
+                "ViewerProtocolPolicy": "allow-all",
+                "TrustedSigners": {"Enabled": False, "Quantity": 0},
+                "ForwardedValues": {
+                    "QueryString": False,
+                    "Cookies": {"Forward": "none"},
+                },
+                "MinTTL": 0,
+            },
+            "Comment": "invalidation test",
+            "Enabled": True,
+        }
+    )
+    dist_id = dist_resp["Distribution"]["Id"]
+
+    inv_resp = cf.create_invalidation(
+        DistributionId=dist_id,
+        InvalidationBatch={
+            "Paths": {"Quantity": 2, "Items": ["/index.html", "/images/*"]},
+            "CallerReference": "inv-ref-1",
+        },
+    )
+    inv_id = inv_resp["Invalidation"]["Id"]
+    assert inv_id
+    assert inv_resp["Invalidation"]["Status"] == "Completed"
+
+    get_inv = cf.get_invalidation(DistributionId=dist_id, Id=inv_id)
+    assert get_inv["Invalidation"]["Id"] == inv_id
+
+    list_inv = cf.list_invalidations(DistributionId=dist_id)
+    items = list_inv["InvalidationList"].get("Items", [])
+    assert any(i["Id"] == inv_id for i in items)
+
+
+def test_cloudfront_oai_crud(cf):
+    create_resp = cf.create_cloud_front_origin_access_identity(
+        CloudFrontOriginAccessIdentityConfig={
+            "CallerReference": "oai-ref-1",
+            "Comment": "My OAI",
+        }
+    )
+    oai_id = create_resp["CloudFrontOriginAccessIdentity"]["Id"]
+    assert oai_id
+    assert create_resp["CloudFrontOriginAccessIdentity"]["S3CanonicalUserId"]
+
+    get_resp = cf.get_cloud_front_origin_access_identity(Id=oai_id)
+    assert get_resp["CloudFrontOriginAccessIdentity"]["Id"] == oai_id
+
+    list_resp = cf.list_cloud_front_origin_access_identities()
+    items = list_resp["CloudFrontOriginAccessIdentityList"].get("Items", [])
+    assert any(o["Id"] == oai_id for o in items)
+
+    etag = get_resp["ETag"]
+    cf.delete_cloud_front_origin_access_identity(Id=oai_id, IfMatch=etag)
+
+    with pytest.raises(ClientError) as exc:
+        cf.get_cloud_front_origin_access_identity(Id=oai_id)
+    assert exc.value.response["Error"]["Code"] in (
+        "NoSuchCloudFrontOriginAccessIdentity", "404"
+    )
+
+
+def test_cloudfront_oac_crud(cf):
+    create_resp = cf.create_origin_access_control(
+        OriginAccessControlConfig={
+            "Name": "my-oac",
+            "Description": "test OAC",
+            "SigningProtocol": "sigv4",
+            "SigningBehavior": "always",
+            "OriginAccessControlOriginType": "s3",
+        }
+    )
+    oac_id = create_resp["OriginAccessControl"]["Id"]
+    assert oac_id
+
+    get_resp = cf.get_origin_access_control(Id=oac_id)
+    assert get_resp["OriginAccessControl"]["Id"] == oac_id
+    assert (
+        get_resp["OriginAccessControl"]["OriginAccessControlConfig"]["Name"] == "my-oac"
+    )
+
+    list_resp = cf.list_origin_access_controls()
+    items = list_resp["OriginAccessControlList"].get("Items", [])
+    assert any(o["Id"] == oac_id for o in items)
+
+    etag = get_resp["ETag"]
+    cf.delete_origin_access_control(Id=oac_id, IfMatch=etag)
+
+    with pytest.raises(ClientError) as exc:
+        cf.get_origin_access_control(Id=oac_id)
+    assert exc.value.response["Error"]["Code"] in ("NoSuchOriginAccessControl", "404")
+
+
+def test_cloudfront_tagging(cf):
+    dist_resp = cf.create_distribution(
+        DistributionConfig={
+            "CallerReference": "cf-intg-tags",
+            "Origins": {
+                "Quantity": 1,
+                "Items": [
+                    {
+                        "Id": "origin-tags",
+                        "DomainName": "tags.example.com",
+                        "CustomOriginConfig": {
+                            "HTTPPort": 80,
+                            "HTTPSPort": 443,
+                            "OriginProtocolPolicy": "https-only",
+                        },
+                    }
+                ],
+            },
+            "DefaultCacheBehavior": {
+                "TargetOriginId": "origin-tags",
+                "ViewerProtocolPolicy": "allow-all",
+                "TrustedSigners": {"Enabled": False, "Quantity": 0},
+                "ForwardedValues": {
+                    "QueryString": False,
+                    "Cookies": {"Forward": "none"},
+                },
+                "MinTTL": 0,
+            },
+            "Comment": "tag test",
+            "Enabled": True,
+        }
+    )
+    dist_arn = dist_resp["Distribution"]["ARN"]
+
+    cf.tag_resource(
+        Resource=dist_arn,
+        Tags={"Items": [{"Key": "env", "Value": "test"}, {"Key": "team", "Value": "infra"}]},
+    )
+
+    tags_resp = cf.list_tags_for_resource(Resource=dist_arn)
+    tag_items = tags_resp["Tags"]["Items"]
+    assert any(t["Key"] == "env" and t["Value"] == "test" for t in tag_items)
+    assert any(t["Key"] == "team" and t["Value"] == "infra" for t in tag_items)
+
+    cf.untag_resource(Resource=dist_arn, TagKeys={"Items": ["team"]})
+    tags_resp2 = cf.list_tags_for_resource(Resource=dist_arn)
+    tag_items2 = tags_resp2["Tags"]["Items"]
+    assert any(t["Key"] == "env" for t in tag_items2)
+    assert not any(t["Key"] == "team" for t in tag_items2)
+
+
+def test_cloudfront_caller_reference_idempotency(cf):
+    config = {
+        "CallerReference": "cf-intg-idem",
+        "Origins": {
+            "Quantity": 1,
+            "Items": [
+                {
+                    "Id": "origin-idem",
+                    "DomainName": "idem.example.com",
+                    "CustomOriginConfig": {
+                        "HTTPPort": 80,
+                        "HTTPSPort": 443,
+                        "OriginProtocolPolicy": "https-only",
+                    },
+                }
+            ],
+        },
+        "DefaultCacheBehavior": {
+            "TargetOriginId": "origin-idem",
+            "ViewerProtocolPolicy": "allow-all",
+            "TrustedSigners": {"Enabled": False, "Quantity": 0},
+            "ForwardedValues": {
+                "QueryString": False,
+                "Cookies": {"Forward": "none"},
+            },
+            "MinTTL": 0,
+        },
+        "Comment": "idempotent",
+        "Enabled": True,
+    }
+    resp1 = cf.create_distribution(DistributionConfig=config)
+    resp2 = cf.create_distribution(DistributionConfig=config)
+    assert resp1["Distribution"]["Id"] == resp2["Distribution"]["Id"]

@@ -138,6 +138,10 @@ SERVICE_PATTERNS = {
     "cloudformation": {
         "host_patterns": [r"cloudformation\."],
     },
+    "cloudfront": {
+        "host_patterns": [r"cloudfront\."],
+        "path_patterns": [r"^/2020-05-31/"],
+    },
 }
 
 
@@ -184,6 +188,7 @@ def detect_service(method: str, path: str, headers: dict, query_params: dict) ->
                 "elasticloadbalancing": "elasticloadbalancing",
                 "elasticfilesystem": "elasticfilesystem",
                 "cloudformation": "cloudformation",
+                "cloudfront": "cloudfront",
             }
             if svc_name in scope_map:
                 return scope_map[svc_name]
@@ -383,6 +388,8 @@ def detect_service(method: str, path: str, headers: dict, query_params: dict) ->
     path_lower = path.lower()
     if path_lower.startswith("/2013-04-01/"):
         return "route53"
+    if path_lower.startswith("/2020-05-31/"):
+        return "cloudfront"
     if path_lower.startswith("/v2/apis"):
         return "apigateway"
     if (path_lower.startswith("/restapis") or path_lower.startswith("/apikeys")
