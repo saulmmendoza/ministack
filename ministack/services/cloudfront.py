@@ -767,7 +767,7 @@ def _create_oai(body: bytes) -> tuple:
         etag = _new_etag()
         oai = {
             "Id": oai_id,
-            "S3CanonicalUserId": "".join(random.choices(string.hexdigits.lower(), k=96)),
+            "S3CanonicalUserId": "".join(random.choices("0123456789abcdef", k=96)),
             "Config": config,
             "ETag": etag,
         }

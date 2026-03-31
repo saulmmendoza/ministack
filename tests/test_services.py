@@ -15070,7 +15070,7 @@ def test_cloudfront_delete_distribution(cf):
 
     with pytest.raises(ClientError) as exc:
         cf.get_distribution(Id=dist_id)
-    assert exc.value.response["Error"]["Code"] in ("NoSuchDistribution", "404")
+    assert exc.value.response["Error"]["Code"] == "NoSuchDistribution"
 
 
 def test_cloudfront_invalidation(cf):
@@ -15149,9 +15149,7 @@ def test_cloudfront_oai_crud(cf):
 
     with pytest.raises(ClientError) as exc:
         cf.get_cloud_front_origin_access_identity(Id=oai_id)
-    assert exc.value.response["Error"]["Code"] in (
-        "NoSuchCloudFrontOriginAccessIdentity", "404"
-    )
+    assert exc.value.response["Error"]["Code"] == "NoSuchCloudFrontOriginAccessIdentity"
 
 
 def test_cloudfront_oac_crud(cf):
@@ -15182,7 +15180,7 @@ def test_cloudfront_oac_crud(cf):
 
     with pytest.raises(ClientError) as exc:
         cf.get_origin_access_control(Id=oac_id)
-    assert exc.value.response["Error"]["Code"] in ("NoSuchOriginAccessControl", "404")
+    assert exc.value.response["Error"]["Code"] == "NoSuchOriginAccessControl"
 
 
 def test_cloudfront_tagging(cf):
