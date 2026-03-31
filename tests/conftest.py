@@ -179,6 +179,10 @@ def cfn():
     return make_client("cloudformation")
 
 @pytest.fixture(scope="session")
+def ct():
+    return make_client("cloudtrail")
+
+@pytest.fixture(scope="session")
 def sfn_sync():
     """SFN client for StartSyncExecution — forces same endpoint (boto3 normally prefixes sync-)."""
     from botocore.config import Config as BotoConfig

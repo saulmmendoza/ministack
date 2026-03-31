@@ -14866,3 +14866,99 @@ def test_cfn_provision_stepfunctions_statemachine(cfn):
     summaries = res["StackResourceSummaries"]
     assert any(r["ResourceType"] == "AWS::StepFunctions::StateMachine" for r in summaries)
     assert all(r["ResourceStatus"] == "CREATE_COMPLETE" for r in summaries)
+
+
+# ---------------------------------------------------------------------------
+# CloudTrail tests
+# ---------------------------------------------------------------------------
+
+def test_cloudtrail_create_trail(ct, s3):
+    s3.create_bucket(Bucket="ct-test-bucket")
+    resp = ct.create_trail(Name="test-trail", S3BucketName="ct-test-bucket")
+    assert resp["Name"] == "test-trail"
+    assert resp["S3BucketName"] == "ct-test-bucket"
+    assert "TrailARN" in resp
+
+
+def test_cloudtrail_describe_trails(ct):
+    resp = ct.describe_trails()
+    names = [t["Name"] for t in resp["trailList"]]
+    assert "test-trail" in names
+
+
+def test_cloudtrail_get_trail(ct):
+    resp = ct.get_trail(Name="test-trail")
+    assert resp["Trail"]["Name"] == "test-trail"
+
+
+def test_cloudtrail_list_trails(ct):
+    resp = ct.list_trails()
+    names = [t["Name"] for t in resp["Trails"]]
+    assert "test-trail" in names
+
+
+def test_cloudtrail_get_trail_status(ct):
+    resp = ct.get_trail_status(Name="test-trail")
+    assert resp["IsLogging"] is False
+
+
+def test_cloudtrail_start_stop_logging(ct):
+    ct.start_logging(Name="test-trail")
+    resp = ct.get_trail_status(Name="test-trail")
+    assert resp["IsLogging"] is True
+
+    ct.stop_logging(Name="test-trail")
+    resp = ct.get_trail_status(Name="test-trail")
+    assert resp["IsLogging"] is False
+
+
+def test_cloudtrail_event_selectors(ct):
+    selectors = [
+        {
+            "ReadWriteType": "All",
+            "IncludeManagementEvents": True,
+            "DataResources": [{"Type": "AWS::S3::Object", "Values": ["arn:aws:s3:::*/*"]}],
+        }
+    ]
+    resp = ct.put_event_selectors(TrailName="test-trail", EventSelectors=selectors)
+    assert len(resp["EventSelectors"]) == 1
+
+    resp = ct.get_event_selectors(TrailName="test-trail")
+    assert len(resp["EventSelectors"]) == 1
+    assert resp["EventSelectors"][0]["ReadWriteType"] == "All"
+
+
+def test_cloudtrail_insight_selectors(ct):
+    resp = ct.put_insight_selectors(
+        TrailName="test-trail",
+        InsightSelectors=[{"InsightType": "ApiCallRateInsight"}],
+    )
+    assert resp["InsightSelectors"][0]["InsightType"] == "ApiCallRateInsight"
+
+    resp = ct.get_insight_selectors(TrailName="test-trail")
+    assert len(resp["InsightSelectors"]) == 1
+
+
+def test_cloudtrail_tags(ct):
+    arn = ct.get_trail(Name="test-trail")["Trail"]["TrailARN"]
+    ct.add_tags(ResourceId=arn, TagsList=[{"Key": "env", "Value": "test"}])
+    resp = ct.list_tags(ResourceIdList=[arn])
+    tags = resp["ResourceTagList"][0]["TagsList"]
+    assert any(t["Key"] == "env" and t["Value"] == "test" for t in tags)
+
+    ct.remove_tags(ResourceId=arn, TagsList=[{"Key": "env"}])
+    resp = ct.list_tags(ResourceIdList=[arn])
+    tags = resp["ResourceTagList"][0]["TagsList"]
+    assert not any(t["Key"] == "env" for t in tags)
+
+
+def test_cloudtrail_lookup_events(ct):
+    resp = ct.lookup_events()
+    assert "Events" in resp
+
+
+def test_cloudtrail_delete_trail(ct):
+    ct.delete_trail(Name="test-trail")
+    resp = ct.describe_trails()
+    names = [t["Name"] for t in resp["trailList"]]
+    assert "test-trail" not in names
