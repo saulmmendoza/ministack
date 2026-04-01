@@ -15111,6 +15111,195 @@ def test_codebuild_list_curated_environment_images(codebuild):
     assert len(resp["platforms"]) > 0
 
 
+def test_codebuild_buildspec_inline_json(codebuild):
+    """Buildspec embedded in the project source (JSON) is executed locally."""
+    buildspec = json.dumps({
+        "version": "0.2",
+        "phases": {
+            "build": {
+                "commands": ["echo hello-from-buildspec"]
+            }
+        }
+    })
+    codebuild.create_project(
+        name="cb-buildspec-json-project",
+        source={"type": "NO_SOURCE", "buildspec": buildspec},
+        artifacts={"type": "NO_ARTIFACTS"},
+        environment={
+            "type": "LINUX_CONTAINER",
+            "image": "aws/codebuild/standard:7.0",
+            "computeType": "BUILD_GENERAL1_SMALL",
+        },
+        serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+    )
+    start_resp = codebuild.start_build(projectName="cb-buildspec-json-project")
+    build_id = start_resp["build"]["id"]
+
+    # Poll until complete (max 10 s)
+    for _ in range(20):
+        time.sleep(0.5)
+        builds = codebuild.batch_get_builds(ids=[build_id])["builds"]
+        if builds and builds[0]["buildComplete"]:
+            break
+
+    builds = codebuild.batch_get_builds(ids=[build_id])["builds"]
+    assert builds, "Build not found"
+    build = builds[0]
+    assert build["buildStatus"] == "SUCCEEDED"
+    assert build["buildComplete"] is True
+    # At least one phase should have been recorded
+    assert len(build["phases"]) >= 1
+    assert any(p["phaseType"] == "BUILD" for p in build["phases"])
+
+
+def test_codebuild_buildspec_override_yaml(codebuild):
+    """buildspecOverride (YAML) supplied at StartBuild time is executed."""
+    buildspec_yaml = (
+        'version: "0.2"\n'
+        "phases:\n"
+        "  install:\n"
+        "    commands:\n"
+        "      - echo install-phase\n"
+        "  build:\n"
+        "    commands:\n"
+        "      - echo build-phase\n"
+    )
+    codebuild.create_project(
+        name="cb-buildspec-yaml-project",
+        source={"type": "NO_SOURCE"},
+        artifacts={"type": "NO_ARTIFACTS"},
+        environment={
+            "type": "LINUX_CONTAINER",
+            "image": "aws/codebuild/standard:7.0",
+            "computeType": "BUILD_GENERAL1_SMALL",
+        },
+        serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+    )
+    start_resp = codebuild.start_build(
+        projectName="cb-buildspec-yaml-project",
+        buildspecOverride=buildspec_yaml,
+    )
+    build_id = start_resp["build"]["id"]
+
+    for _ in range(20):
+        time.sleep(0.5)
+        builds = codebuild.batch_get_builds(ids=[build_id])["builds"]
+        if builds and builds[0]["buildComplete"]:
+            break
+
+    builds = codebuild.batch_get_builds(ids=[build_id])["builds"]
+    assert builds
+    build = builds[0]
+    assert build["buildStatus"] == "SUCCEEDED"
+    phase_types = {p["phaseType"] for p in build["phases"]}
+    assert "INSTALL" in phase_types
+    assert "BUILD" in phase_types
+
+
+def test_codebuild_buildspec_failing_command(codebuild):
+    """A failing command in the buildspec marks the build FAILED."""
+    buildspec = json.dumps({
+        "version": "0.2",
+        "phases": {
+            "build": {
+                "commands": ["exit 1"]
+            }
+        }
+    })
+    codebuild.create_project(
+        name="cb-buildspec-fail-project",
+        source={"type": "NO_SOURCE", "buildspec": buildspec},
+        artifacts={"type": "NO_ARTIFACTS"},
+        environment={
+            "type": "LINUX_CONTAINER",
+            "image": "aws/codebuild/standard:7.0",
+            "computeType": "BUILD_GENERAL1_SMALL",
+        },
+        serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+    )
+    start_resp = codebuild.start_build(projectName="cb-buildspec-fail-project")
+    build_id = start_resp["build"]["id"]
+
+    for _ in range(20):
+        time.sleep(0.5)
+        builds = codebuild.batch_get_builds(ids=[build_id])["builds"]
+        if builds and builds[0]["buildComplete"]:
+            break
+
+    builds = codebuild.batch_get_builds(ids=[build_id])["builds"]
+    assert builds
+    assert builds[0]["buildStatus"] == "FAILED"
+    assert builds[0]["buildComplete"] is True
+
+
+def test_codebuild_buildspec_env_variables(codebuild):
+    """Environment variables are passed into buildspec commands."""
+    buildspec = json.dumps({
+        "version": "0.2",
+        "phases": {
+            "build": {
+                "commands": [
+                    "test \"$MY_VAR\" = \"hello\""
+                ]
+            }
+        }
+    })
+    codebuild.create_project(
+        name="cb-buildspec-env-project",
+        source={"type": "NO_SOURCE", "buildspec": buildspec},
+        artifacts={"type": "NO_ARTIFACTS"},
+        environment={
+            "type": "LINUX_CONTAINER",
+            "image": "aws/codebuild/standard:7.0",
+            "computeType": "BUILD_GENERAL1_SMALL",
+            "environmentVariables": [
+                {"name": "MY_VAR", "value": "hello"}
+            ],
+        },
+        serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+    )
+    start_resp = codebuild.start_build(projectName="cb-buildspec-env-project")
+    build_id = start_resp["build"]["id"]
+
+    for _ in range(20):
+        time.sleep(0.5)
+        builds = codebuild.batch_get_builds(ids=[build_id])["builds"]
+        if builds and builds[0]["buildComplete"]:
+            break
+
+    builds = codebuild.batch_get_builds(ids=[build_id])["builds"]
+    assert builds
+    assert builds[0]["buildStatus"] == "SUCCEEDED", \
+        f"Expected SUCCEEDED, got {builds[0]['buildStatus']}"
+
+
+def test_codebuild_no_buildspec_still_succeeds(codebuild):
+    """A project with no buildspec still completes successfully (simulated)."""
+    codebuild.create_project(
+        name="cb-no-buildspec-project",
+        source={"type": "NO_SOURCE"},
+        artifacts={"type": "NO_ARTIFACTS"},
+        environment={
+            "type": "LINUX_CONTAINER",
+            "image": "aws/codebuild/standard:7.0",
+            "computeType": "BUILD_GENERAL1_SMALL",
+        },
+        serviceRole="arn:aws:iam::000000000000:role/codebuild-role",
+    )
+    start_resp = codebuild.start_build(projectName="cb-no-buildspec-project")
+    build_id = start_resp["build"]["id"]
+
+    for _ in range(20):
+        time.sleep(0.5)
+        builds = codebuild.batch_get_builds(ids=[build_id])["builds"]
+        if builds and builds[0]["buildComplete"]:
+            break
+
+    builds = codebuild.batch_get_builds(ids=[build_id])["builds"]
+    assert builds
+    assert builds[0]["buildStatus"] == "SUCCEEDED"
+
+
 # ========== CodePipeline ==========
 
 
